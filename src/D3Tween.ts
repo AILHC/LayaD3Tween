@@ -122,6 +122,10 @@ export default class D3Tween {
         }
         this.tweenMap[target.id].push(tween);
     }
+    /**
+     * 清除3d物体上的所有缓动动画
+     * @param target 
+     */
     public static ClearTween(target:Laya.Sprite3D){
         let tweens = this.tweenMap[target.id] as Array<Laya.Tween>;
         if(tweens&&tweens.length){
