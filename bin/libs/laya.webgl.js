@@ -9,12 +9,11 @@
 	var HTMLCanvas=laya.resource.HTMLCanvas,HTMLChar=laya.utils.HTMLChar,HTMLImage=laya.resource.HTMLImage,Handler=laya.utils.Handler;
 	var Loader=laya.net.Loader,Matrix=laya.maths.Matrix,Node=laya.display.Node,Point=laya.maths.Point,Pool=laya.utils.Pool;
 	var Rectangle=laya.maths.Rectangle,Render=laya.renders.Render,RenderSprite=laya.renders.RenderSprite,Resource=laya.resource.Resource;
-	var ResourceManager=laya.resource.ResourceManager,RestoreCmd=laya.display.cmd.RestoreCmd,RotateCmd=laya.display.cmd.RotateCmd;
-	var RunDriver=laya.utils.RunDriver,SaveCmd=laya.display.cmd.SaveCmd,ScaleCmd=laya.display.cmd.ScaleCmd,Sprite=laya.display.Sprite;
-	var SpriteConst=laya.display.SpriteConst,SpriteStyle=laya.display.css.SpriteStyle,Stage=laya.display.Stage;
-	var Stat=laya.utils.Stat,StringKey=laya.utils.StringKey,System=laya.system.System,Text=laya.display.Text;
-	var Texture=laya.resource.Texture,TransformCmd=laya.display.cmd.TransformCmd,TranslateCmd=laya.display.cmd.TranslateCmd;
-	var VectorGraphManager=laya.utils.VectorGraphManager,WordText=laya.utils.WordText;
+	var RestoreCmd=laya.display.cmd.RestoreCmd,RotateCmd=laya.display.cmd.RotateCmd,RunDriver=laya.utils.RunDriver;
+	var SaveCmd=laya.display.cmd.SaveCmd,ScaleCmd=laya.display.cmd.ScaleCmd,Sprite=laya.display.Sprite,SpriteConst=laya.display.SpriteConst;
+	var SpriteStyle=laya.display.css.SpriteStyle,Stage=laya.display.Stage,Stat=laya.utils.Stat,StringKey=laya.utils.StringKey;
+	var System=laya.system.System,Text=laya.display.Text,Texture=laya.resource.Texture,TransformCmd=laya.display.cmd.TransformCmd;
+	var TranslateCmd=laya.display.cmd.TranslateCmd,VectorGraphManager=laya.utils.VectorGraphManager,WordText=laya.utils.WordText;
 Laya.interface('laya.webgl.submit.ISubmit');
 Laya.interface('laya.webgl.canvas.save.ISaveData');
 //class laya.webgl.canvas.save.SaveBase
@@ -87,6 +86,7 @@ var Value2D=(function(){
 		//这个目前只给setIBVB用。其他的都放到attribute的color中了
 		//this.mmat=null;
 		//worldmatrix，是4x4的，因为为了shader使用方便。 TODO 换成float32Array
+		//this.u_MvpMatrix=null;
 		//this.texture=null;
 		this.ALPHA=1.0;
 		//这个？
@@ -137,6 +137,10 @@ var Value2D=(function(){
 		var renderstate2d=RenderState2D;
 		RenderState2D.worldMatrix4===RenderState2D.TEMPMAT4_ARRAY || this.defines.addInt(/*laya.webgl.shader.d2.ShaderDefines2D.WORLDMAT*/0x80);
 		this.mmat=renderstate2d.worldMatrix4;
+		if (RenderState2D.matWVP){
+			this.defines.addInt(/*laya.webgl.shader.d2.ShaderDefines2D.MVP3D*/0x800);
+			this.u_MvpMatrix=RenderState2D.matWVP.elements;
+		};
 		var sd=Shader.sharders[this.mainID | this.defines._value] || this._ShaderWithCompile();
 		if (sd._shaderValueWidth!==renderstate2d.width || sd._shaderValueHeight!==renderstate2d.height){
 			this.size[0]=renderstate2d.width;
@@ -466,6 +470,165 @@ var LayaGL=(function(){
 })()
 
 
+// 注意长宽都不要超过256，一个是影响效率，一个是超出表达能力
+//class laya.webgl.text.AtlasGrid
+var AtlasGrid=(function(){
+	function AtlasGrid(width,height,id){
+		this.atlasID=0;
+		this._width=0;
+		this._height=0;
+		this._texCount=0;
+		this._rowInfo=null;
+		// 当前行的最大长度
+		this._cells=null;
+		// 每个格子的信息。{type,w,h}相当于一个距离场. type=0 表示空闲的。不为0的情况下填充的是宽高（有什么用呢）
+		this._used=0;
+		(width===void 0)&& (width=0);
+		(height===void 0)&& (height=0);
+		(id===void 0)&& (id=0);
+		this._cells=null;
+		this._rowInfo=null;
+		this.atlasID=id;
+		this._init(width,height);
+	}
+
+	__class(AtlasGrid,'laya.webgl.text.AtlasGrid');
+	var __proto=AtlasGrid.prototype;
+	//------------------------------------------------------------------
+	__proto.addRect=function(type,width,height,pt){
+		if (!this._get(width,height,pt))
+			return false;
+		this._fill(pt.x,pt.y,width,height,type);
+		this._texCount++;
+		return true;
+	}
+
+	//------------------------------------------------------------------------------
+	__proto._release=function(){
+		this._cells=null;
+		this._rowInfo=null;
+	}
+
+	//------------------------------------------------------------------------------
+	__proto._init=function(width,height){
+		this._width=width;
+		this._height=height;
+		this._release();
+		if (this._width==0)return false;
+		this._cells=new Uint8Array(this._width *this._height*3);
+		this._rowInfo=new Uint8Array(this._height);
+		this._used=0;
+		this._clear();
+		return true;
+	}
+
+	//------------------------------------------------------------------
+	__proto._get=function(width,height,pt){
+		if (width > this._width || height >this._height){
+			return false;
+		};
+		var rx=-1;
+		var ry=-1;
+		var nWidth=this._width;
+		var nHeight=this._height;
+		var pCellBox=this._cells;
+		for (var y=0;y < nHeight;y++){
+			if (this._rowInfo[y] < width)continue ;
+			for (var x=0;x < nWidth;){
+				var tm=(y *nWidth+x)*3;
+				if (pCellBox[tm] !=0 || pCellBox[tm+1] < width || pCellBox[tm+2] < height){
+					x+=pCellBox[tm+1];
+					continue ;
+				}
+				rx=x;
+				ry=y;
+				for (var xx=0;xx < width;xx++){
+					if (pCellBox[3*xx+tm+2] < height){
+						rx=-1;
+						break ;
+					}
+				}
+				if (rx < 0){
+					x+=pCellBox[tm+1];
+					continue ;
+				}
+				pt.x=rx;
+				pt.y=ry;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	//------------------------------------------------------------------
+	__proto._fill=function(x,y,w,h,type){
+		var nWidth=this._width;
+		var nHeghit=this._height;
+		this._check((x+w)<=nWidth && (y+h)<=nHeghit);
+		for (var yy=y;yy < (h+y);++yy){
+			this._check(this._rowInfo[yy] >=w);
+			this._rowInfo[yy]-=w;
+			for (var xx=0;xx < w;xx++){
+				var tm=(x+yy *nWidth+xx)*3;
+				this._check(this._cells[tm]==0);
+				this._cells[tm]=type;
+				this._cells[tm+1]=w;
+				this._cells[tm+2]=h;
+			}
+		}
+		if (x > 0){
+			for (yy=0;yy < h;++yy){
+				var s=0;
+				for (xx=x-1;xx >=0;--xx,++s){
+					if (this._cells[((y+yy)*nWidth+xx)*3] !=0)break ;
+				}
+				for (xx=s;xx > 0;--xx){
+					this._cells[((y+yy)*nWidth+x-xx)*3+1]=xx;
+					this._check(xx > 0);
+				}
+			}
+		}
+		if (y > 0){
+			for (xx=x;xx < (x+w);++xx){
+				s=0;
+				for (yy=y-1;yy >=0;--yy,s++){
+					if (this._cells[(xx+yy *nWidth)*3] !=0)break ;
+				}
+				for (yy=s;yy > 0;--yy){
+					this._cells[(xx+(y-yy)*nWidth)*3+2]=yy;
+					this._check(yy > 0);
+				}
+			}
+		}
+		this._used+=(w*h)/(this._width*this._height);
+	}
+
+	__proto._check=function(ret){
+		if (ret==false){
+			console.log("xtexMerger 错误啦");
+		}
+	}
+
+	//------------------------------------------------------------------
+	__proto._clear=function(){
+		this._texCount=0;
+		for (var y=0;y < this._height;y++){
+			this._rowInfo[y]=this._width;
+		}
+		for (var i=0;i < this._height;i++){
+			for (var j=0;j < this._width;j++){
+				var tm=(i *this._width+j)*3;
+				this._cells[tm]=0;
+				this._cells[tm+1]=this._width-j;
+				this._cells[tm+2]=this._width-i;
+			}
+		}
+	}
+
+	return AtlasGrid;
+})()
+
+
 /**
 *Mesh2d只是保存数据。描述attribute用的。本身不具有渲染功能。
 */
@@ -689,6 +852,732 @@ var DrawStyle=(function(){
 	['DEFAULT',function(){return this.DEFAULT=new DrawStyle("#000000");}
 	]);
 	return DrawStyle;
+})()
+
+
+//class laya.webgl.text.TextRender
+var TextRender=(function(){
+	function TextRender(){
+		/**
+		*fontSizeInfo
+		*记录每种字体的像素的大小。标准是32px的字体。由4个byte组成，分别表示[xdist,ydist,w,h]。
+		*xdist,ydist 是像素起点到排版原点的距离，都是正的，表示实际数据往左和上偏多少，如果实际往右和下偏，则算作0，毕竟这个只是一个大概
+		*例如 [Arial]=0x00002020,表示宽高都是32
+		*/
+		this.fontSizeInfo={};
+		this.charRender=null;
+		this.mapFont={};
+		// 把font名称映射到数字
+		this.fontID=0;
+		this.mapColor=[];
+		// 把color映射到数字
+		this.colorID=0;
+		this.fontScaleX=1.0;
+		//临时缩放。
+		this.fontScaleY=1.0;
+		//private var charMaps:Object={};// 所有的都放到一起
+		this._curStrPos=0;
+		// 所有的独立贴图
+		this.bmpData32=null;
+		// 当前字体的测量信息。
+		this.lastFont=null;
+		this.fontSizeW=0;
+		this.fontSizeH=0;
+		this.fontSizeOffX=0;
+		this.fontSizeOffY=0;
+		this.renderPerChar=true;
+		this.textureMem=0;
+		// 当前贴图所占用的内存
+		this.fontStr=null;
+		this.textAtlases=[];
+		this.isoTextures=[];
+		this.tmpAtlasPos=new Point();
+		var bugIOS=false;
+		var miniadp=Laya['MiniAdpter'];
+		if (miniadp && miniadp.systemInfo && miniadp.systemInfo.system){
+			bugIOS=miniadp.systemInfo.system.toLowerCase()==='ios 10.1.1';
+		}
+		if (Browser.onMiniGame && !bugIOS)TextRender.isWan1Wan=true;
+		if (Browser.onLimixiu)TextRender.isWan1Wan=true;
+		this.charRender=Render.isConchApp ? (new CharRender_Native()):(new CharRender_Canvas(TextRender.atlasWidth,TextRender.atlasWidth,TextRender.scaleFontWithCtx,!TextRender.isWan1Wan,false));
+		TextRender.textRenderInst=this;
+		Laya['textRender']=this;
+		TextRender.atlasWidth2=TextRender.atlasWidth *TextRender.atlasWidth;
+	}
+
+	__class(TextRender,'laya.webgl.text.TextRender');
+	var __proto=TextRender.prototype;
+	/**
+	*设置当前字体，获得字体的大小信息。
+	*@param font
+	*/
+	__proto.setFont=function(font){
+		if (this.lastFont==font)return;
+		this.lastFont=font;
+		var fontsz=this.getFontSizeInfo(font._family);
+		var offx=fontsz >> 24;
+		var offy=(fontsz >> 16)& 0xff;
+		var fw=(fontsz >> 8)& 0xff;
+		var fh=fontsz & 0xff;
+		var k=font._size / TextRender.standardFontSize;
+		this.fontSizeOffX=Math.ceil(offx *k);
+		this.fontSizeOffY=Math.ceil(offy *k);
+		this.fontSizeW=Math.ceil(fw *k);
+		this.fontSizeH=Math.ceil(fh *k);
+		this.fontStr=font._font.replace('italic','');
+	}
+
+	/**
+	*从string中取出一个完整的char，例如emoji的话要多个
+	*会修改 _curStrPos
+	*TODO 由于各种文字中的组合写法，这个需要能扩展，以便支持泰文等
+	*@param str
+	*@param start 开始位置
+	*/
+	__proto.getNextChar=function(str){
+		var len=str.length;
+		var start=this._curStrPos;
+		if (start >=len)
+			return null;
+		var link=false;
+		var i=start;
+		var state=0;
+		for (;i < len;i++){
+			var c=str.charCodeAt(i);
+			if ((c >>> 11)==0x1b){
+				if (state==1)break ;
+				state=1;
+				i++;
+			}
+			else if (c===0xfe0e || c===0xfe0f){}
+			else if (c==0x200d){
+				state=2;
+				}else {
+				if (state==0)state=1;
+				else if (state==1)break ;
+				else if (state==2){}
+			}
+		}
+		this._curStrPos=i;
+		return str.substring(start,i);
+	}
+
+	__proto.filltext=function(ctx,data,x,y,fontStr,color,strokeColor,lineWidth,textAlign,underLine){
+		(underLine===void 0)&& (underLine=0);
+		if (data.length <=0)
+			return;
+		var font=FontInfo.Parse(fontStr);
+		var nTextAlign=0;
+		switch (textAlign){
+			case 'center':
+				nTextAlign=Context.ENUM_TEXTALIGN_CENTER;
+				break ;
+			case 'right':
+				nTextAlign=Context.ENUM_TEXTALIGN_RIGHT;
+				break ;
+			}
+		this._fast_filltext(ctx,data,null,x,y,font,color,strokeColor,lineWidth,nTextAlign,underLine);
+	}
+
+	__proto.fillWords=function(ctx,data,x,y,fontStr,color,strokeColor,lineWidth){
+		if (!data)return;
+		if (data.length <=0)return;
+		var font=FontInfo.Parse(fontStr);
+		this._fast_filltext(ctx,null,data,x,y,font,color,strokeColor,lineWidth,0,0);
+	}
+
+	__proto._fast_filltext=function(ctx,data,htmlchars,x,y,font,color,strokeColor,lineWidth,textAlign,underLine){
+		(underLine===void 0)&& (underLine=0);
+		if (data && data.length < 1)return;
+		if (htmlchars && htmlchars.length < 1)return;
+		if (lineWidth < 0)lineWidth=0;
+		this.setFont(font);
+		this.fontScaleX=this.fontScaleY=1.0;
+		if (TextRender.scaleFontWithCtx){
+			var sx=1;
+			var sy=1;
+			if (Render.isConchApp){
+				sx=ctx._curMat.getScaleX();
+				sy=ctx._curMat.getScaleY();
+				}else{
+				sx=ctx.getMatScaleX();
+				sy=ctx.getMatScaleY();
+			}
+			if (sx < 1e-4 || sy < 1e-1)
+				return;
+			if (sx > 1)this.fontScaleX=sx;
+			if (sy > 1)this.fontScaleY=sy;
+		}
+		font._italic && (ctx._italicDeg=13);
+		var wt=data;
+		var isWT=!htmlchars && ((data instanceof laya.utils.WordText ));
+		var str=data;
+		var isHtmlChar=!!htmlchars;
+		var sameTexData=isWT ? wt.pageChars :[];
+		var strWidth=0;
+		if (isWT){
+			str=wt._text;
+			strWidth=wt.width;
+			if (strWidth < 0){
+				strWidth=wt.width=this.charRender.getWidth(this.fontStr,str);
+			}
+			}else {
+			strWidth=str?this.charRender.getWidth(this.fontStr,str):0;
+		}
+		switch (textAlign){
+			case Context.ENUM_TEXTALIGN_CENTER:
+				x-=strWidth / 2;
+				break ;
+			case Context.ENUM_TEXTALIGN_RIGHT:
+				x-=strWidth;
+				break ;
+			}
+		if (wt && sameTexData){
+			if (this.hasFreedText(sameTexData)){
+				sameTexData=wt.pageChars=[];
+			}
+		};
+		var ri=null;
+		var oneTex=isWT || TextRender.forceWholeRender;
+		var splitTex=this.renderPerChar=(!isWT)|| TextRender.forceSplitRender || isHtmlChar;
+		if (!sameTexData || sameTexData.length < 1){
+			if (splitTex){
+				var stx=0;
+				var sty=0;
+				this._curStrPos=0;
+				var curstr;
+				while(true){
+					if (isHtmlChar){
+						var chc=htmlchars[this._curStrPos++];
+						if(chc){
+							curstr=chc.char;
+							stx=chc.x;
+							sty=chc.y;
+							}else {
+							curstr=null;
+						}
+						}else {
+						curstr=this.getNextChar(str);
+					}
+					if (!curstr)
+						break ;
+					ri=this.getCharRenderInfo(curstr,font,color,strokeColor,lineWidth,false);
+					if (!ri){
+						break ;
+					}
+					if (ri.isSpace){
+						}else {
+						var add=sameTexData[ri.tex.id];
+						if (!add){
+							sameTexData[ri.tex.id]=add=[];
+						}
+						if (Render.isConchApp){
+							add.push({ri:ri,x:stx,y:sty,w:ri.bmpWidth / this.fontScaleX,h:ri.bmpHeight / this.fontScaleY });
+							}else{
+							add.push({ri:ri,x:stx+1/this.fontScaleX,y:sty+1/this.fontScaleY,w:(ri.bmpWidth-2)/ this.fontScaleX,h:(ri.bmpHeight-2)/ this.fontScaleY });
+						}
+						stx+=ri.width;
+					}
+				}
+				}else {
+				var isotex=TextRender.noAtlas || strWidth*this.fontScaleX > TextRender.atlasWidth;
+				ri=this.getCharRenderInfo(str,font,color,strokeColor,lineWidth,isotex);
+				if (Render.isConchApp){
+					sameTexData[0]=[{ri:ri,x:0,y:0,w:ri.bmpWidth / this.fontScaleX,h:ri.bmpHeight / this.fontScaleY }];
+					}else{
+					sameTexData[0]=[{ri:ri,x:1/this.fontScaleX,y:1/this.fontScaleY,w:(ri.bmpWidth-2)/ this.fontScaleX,h:(ri.bmpHeight-2)/ this.fontScaleY }];
+				}
+			}
+		}
+		this._drawResortedWords(ctx,x,y,sameTexData);
+		ctx._italicDeg=0;
+	}
+
+	/**
+	*画出重新按照贴图顺序分组的文字。
+	*@param samePagesData
+	*@param startx 保存的数据是相对位置，所以需要加上这个偏移。用相对位置更灵活一些。
+	*@param y {int}因为这个只能画在一行上所以没有必要保存y。所以这里再把y传进来
+	*/
+	__proto._drawResortedWords=function(ctx,startx,starty,samePagesData){
+		var isLastRender=ctx._charSubmitCache && ctx._charSubmitCache._enbale;
+		for (var id in samePagesData){
+			var pri=samePagesData[id];
+			var pisz=pri.length;if (pisz <=0)continue ;
+			for (var j=0;j < pisz;j++){
+				var riSaved=pri[j];
+				var ri=riSaved.ri;
+				if (ri.isSpace)continue ;
+				ri.touch();
+				ctx.drawTexAlign=true;
+				if (Render.isConchApp){
+					ctx._drawTextureM(ri.tex.texture,startx+riSaved.x-ri.orix ,starty+riSaved.y-ri.oriy,riSaved.w,riSaved.h,null,1.0,ri.uv);
+				}else
+				ctx._inner_drawTexture(ri.tex.texture,(ri.tex.texture).bitmap.id,
+				startx+riSaved.x-ri.orix ,starty+riSaved.y-ri.oriy,riSaved.w,riSaved.h,
+				null,ri.uv,1.0,isLastRender);
+				if ((ctx).touches){
+					(ctx).touches.push(ri);
+				}
+			}
+		}
+	}
+
+	/**
+	*检查 txts数组中有没有被释放的资源
+	*@param txts {{ri:CharRenderInfo,...}[][]}
+	*@param startid
+	*@return
+	*/
+	__proto.hasFreedText=function(txts){
+		for (var i in txts){
+			var pri=txts[i];
+			for (var j=0,pisz=pri.length;j < pisz;j++){
+				var riSaved=(pri [j]).ri;
+				if (riSaved.deleted || riSaved.tex.__destroyed){
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	__proto.getCharRenderInfo=function(str,font,color,strokeColor,lineWidth,isoTexture){
+		(isoTexture===void 0)&& (isoTexture=false);
+		var fid=this.mapFont[font._family];
+		if (fid==undefined){
+			this.mapFont[font._family]=fid=this.fontID++;
+		};
+		var key=str+'_'+fid+'_'+font._size+'_'+color;
+		if (lineWidth > 0)
+			key+='_'+strokeColor+lineWidth;
+		if (font._bold)
+			key+='P';
+		if (this.fontScaleX !=1 || this.fontScaleY !=1){
+			key+=(this.fontScaleX*20|0)+'_'+(this.fontScaleY*20|0);
+		};
+		var i=0;
+		var sz=this.textAtlases.length;
+		var ri=null;
+		var atlas=null;
+		if(!isoTexture){
+			for (i=0;i < sz;i++){
+				atlas=this.textAtlases[i];
+				ri=atlas.charMaps[key]
+				if (ri){
+					ri.touch();
+					return ri;
+				}
+			}
+		}
+		ri=new CharRenderInfo();
+		this.charRender.scale(this.fontScaleX,this.fontScaleY);
+		ri.char=str;
+		ri.height=font._size;
+		var margin=font._size / 3 |0;
+		var imgdt=null;
+		var w1=Math.ceil(this.charRender.getWidth(this.fontStr,str)*this.fontScaleX);
+		if (w1 > this.charRender.canvasWidth){
+			this.charRender.canvasWidth=Math.min(2048,w1+margin *2);
+		}
+		if (isoTexture){
+			imgdt=this.charRender.getCharBmp(str,this.fontStr,lineWidth,color,strokeColor,ri,margin,margin,margin,margin,null);
+			var tex=TextTexture.getTextTexture(imgdt.width,imgdt.height);
+			tex.addChar(imgdt,0,0,ri.uv);
+			ri.tex=tex;
+			ri.orix=margin;
+			ri.oriy=margin;
+			tex.ri=ri;
+			this.isoTextures.push(tex);
+			}else {
+			var len=str.length;
+			if (len > 1){
+			};
+			var lineExt=lineWidth*1;
+			var fw=Math.ceil((this.fontSizeW+lineExt*2)*this.fontScaleX);
+			var fh=Math.ceil((this.fontSizeH+lineExt*2)*this.fontScaleY);
+			TextRender.imgdtRect[0]=((margin-this.fontSizeOffX-lineExt)*this.fontScaleX)|0;
+			TextRender.imgdtRect[1]=((margin-this.fontSizeOffY-lineExt)*this.fontScaleY)|0;
+			if (this.renderPerChar||len==1){
+				TextRender.imgdtRect[2]=Math.max(w1,fw);
+				TextRender.imgdtRect[3]=Math.max(w1,fh);
+				}else {
+				TextRender.imgdtRect[2]=-1;
+				TextRender.imgdtRect[3]=fh;
+			}
+			imgdt=this.charRender.getCharBmp(str,this.fontStr,lineWidth,color,strokeColor,ri,
+			margin,margin,margin,margin,TextRender.imgdtRect);
+			atlas=this.addBmpData(imgdt,ri);
+			if (TextRender.isWan1Wan){
+				ri.orix=margin;
+				ri.oriy=margin;
+				}else {
+				ri.orix=(this.fontSizeOffX+lineExt);
+				ri.oriy=(this.fontSizeOffY+lineExt);
+			}
+			atlas.charMaps[key]=ri;
+		}
+		return ri;
+	}
+
+	/**
+	*添加数据到大图集
+	*@param w
+	*@param h
+	*@return
+	*/
+	__proto.addBmpData=function(data,ri){
+		var w=data.width;
+		var h=data.height;
+		var sz=this.textAtlases.length;
+		var atlas=null;
+		var find=false;
+		for (var i=0;i < sz;i++){
+			atlas=this.textAtlases[i];
+			find=atlas.getAEmpty(w,h,this.tmpAtlasPos);
+			if (find){
+				break ;
+			}
+		}
+		if (!find){
+			atlas=new TextAtlas()
+			this.textAtlases.push(atlas);
+			find=atlas.getAEmpty(w,h,this.tmpAtlasPos);
+			if (!find){
+				throw 'err1';
+			}
+			this.cleanAtlases();
+		}
+		if(find){
+			atlas.texture.addChar(data,this.tmpAtlasPos.x,this.tmpAtlasPos.y,ri.uv);
+			ri.tex=/*__JS__ */atlas.texture;
+		}
+		return atlas;
+	}
+
+	__proto.GC=function(force){
+		var i=0;
+		var sz=this.textAtlases.length;
+		var dt=0;
+		var destroyDt=TextRender.destroyAtlasDt;
+		var totalUsedRate=0;
+		var totalUsedRateAtlas=0;
+		var maxWasteRateID=-1;
+		var maxWasteRate=0;
+		var tex=null;
+		var curatlas=null;
+		for (;i < sz;i++){
+			curatlas=this.textAtlases[i];
+			tex=curatlas.texture;
+			if (tex){
+				totalUsedRate+=tex.curUsedCovRate;
+				totalUsedRateAtlas+=tex.curUsedCovRateAtlas;
+				var waste=curatlas.usedRate-tex.curUsedCovRateAtlas;
+				if (maxWasteRate < waste){
+					maxWasteRate=waste;
+					maxWasteRateID=i;
+				}
+			}
+			dt=Stat.loopCount-curatlas.texture.lastTouchTm;
+			if (dt > destroyDt){
+				TextRender.showLog && console.log('TextRender GC delete atlas '+tex?curatlas.texture.id:'unk');
+				curatlas.destroy();
+				this.textAtlases[i]=this.textAtlases[sz-1];
+				sz--;
+				i--;
+			}
+		}
+		this.textAtlases.length=sz;
+		sz=this.isoTextures.length;
+		for (i=0;i < sz;i++){
+			tex=this.isoTextures[i];
+			dt=Stat.loopCount-tex.lastTouchTm;
+			if (dt > TextRender.destroyUnusedTextureDt){
+				tex.ri.deleted=true;
+				tex.ri.tex=null;
+				tex.destroy();
+				this.isoTextures[i]=this.isoTextures[sz-1];
+				sz--;
+				i--;
+			}
+		};
+		var needGC=this.textAtlases.length > 1 && this.textAtlases.length-totalUsedRateAtlas >=2;
+		if (TextRender.atlasWidth *TextRender.atlasWidth *4 *this.textAtlases.length > TextRender.cleanMem || needGC || TextRender.simClean){
+			TextRender.simClean=false;
+			TextRender.showLog && console.log('清理使用率低的贴图。总使用率:',totalUsedRateAtlas,':',this.textAtlases.length,'最差贴图:'+maxWasteRateID);
+			if(maxWasteRateID>=0){
+				curatlas=this.textAtlases[maxWasteRateID];
+				curatlas.destroy();
+				this.textAtlases[maxWasteRateID]=this.textAtlases[this.textAtlases.length-1];
+				this.textAtlases.length=this.textAtlases.length-1;
+			}
+		}
+		TextTexture.clean();
+	}
+
+	/**
+	*尝试清理大图集
+	*/
+	__proto.cleanAtlases=function(){}
+	// TODO 根据覆盖率决定是否清理
+	__proto.getCharBmp=function(c){}
+	/**
+	*检查当前线是否存在数据
+	*@param data
+	*@param l
+	*@param sx
+	*@param ex
+	*@return
+	*/
+	__proto.checkBmpLine=function(data,l,sx,ex){
+		if (this.bmpData32.buffer !=data.data.buffer){
+			this.bmpData32=new Uint32Array(data.data.buffer);
+		};
+		var stpos=data.width *l+sx;
+		for (var x=sx;x < ex;x++){
+			if (this.bmpData32[stpos++] !=0)return true;
+		}
+		return false;
+	}
+
+	/**
+	*根据bmp数据和当前的包围盒，更新包围盒
+	*由于选择的文字是连续的，所以可以用二分法
+	*@param data
+	*@param curbbx [l,t,r,b]
+	*@param onlyH 不检查左右
+	*/
+	__proto.updateBbx=function(data,curbbx,onlyH){
+		(onlyH===void 0)&& (onlyH=false);
+		var w=data.width;
+		var h=data.height;
+		var x=0;
+		var sy=curbbx[1];
+		var ey=0;
+		var y=sy;
+		if (this.checkBmpLine(data,sy,0,w)){
+			while (true){
+				y=(sy+ey)/ 2 | 0;
+				if (y+1 >=sy){
+					curbbx[1]=y;
+					break ;
+				}
+				if(this.checkBmpLine(data,y,0,w)){
+					sy=y;
+					}else {
+					ey=y;
+				}
+			}
+		}
+		if (curbbx[3] > h)curbbx[3]=h;
+		else{
+			y=sy=curbbx[3];
+			ey=h;
+			if (this.checkBmpLine(data,sy,0,w)){
+				while(true){
+					y=(sy+ey)/ 2 | 0;
+					if (y-1 <=sy){
+						curbbx[3]=y;
+						break ;
+					}
+					if (this.checkBmpLine(data,y,0,w)){
+						sy=y;
+						}else {
+						ey=y;
+					}
+				}
+			}
+		}
+		if (onlyH)
+			return;
+		var minx=curbbx[0];
+		var stpos=w*curbbx[1];
+		for (y=curbbx[1];y < curbbx[3];y++){
+			for (x=0;x < minx;x++){
+				if (this.bmpData32[stpos+x] !=0){
+					minx=x;
+					break ;
+				}
+			}
+			stpos+=w;
+		}
+		curbbx[0]=minx;
+		var maxx=curbbx[2];
+		stpos=w*curbbx[1];
+		for (y=curbbx[1];y < curbbx[3];y++){
+			for (x=maxx;x < w;x++){
+				if (this.bmpData32[stpos+x] !=0){
+					maxx=x;
+					break ;
+				}
+			}
+			stpos+=w;
+		}
+		curbbx[2]=maxx;
+	}
+
+	__proto.getFontSizeInfo=function(font){
+		var finfo=this.fontSizeInfo[font];
+		if (finfo !=undefined)
+			return finfo;
+		var fontstr='bold '+TextRender.standardFontSize+'px '+font;
+		if (TextRender.isWan1Wan){
+			this.fontSizeW=this.charRender.getWidth(fontstr,'国')*1.5;
+			this.fontSizeH=TextRender.standardFontSize *1.5;
+			var szinfo=this.fontSizeW << 8 | this.fontSizeH;
+			this.fontSizeInfo[font]=szinfo;
+			return szinfo;
+		}
+		TextRender.pixelBBX[0]=TextRender.standardFontSize / 2;
+		TextRender.pixelBBX[1]=TextRender.standardFontSize / 2;
+		TextRender.pixelBBX[2]=TextRender.standardFontSize;
+		TextRender.pixelBBX[3]=TextRender.standardFontSize;
+		var orix=16;
+		var oriy=16;
+		var marginr=16;
+		var marginb=16;
+		this.charRender.scale(1,1);
+		TextRender.tmpRI.height=TextRender.standardFontSize;
+		var bmpdt=this.charRender.getCharBmp('g',fontstr,0,'red',null,TextRender.tmpRI,orix,oriy,marginr,marginb);
+		if (Render.isConchApp){
+			bmpdt.data=new /*__JS__ */Uint8ClampedArray(bmpdt.data);
+		}
+		this.bmpData32=new Uint32Array(bmpdt.data.buffer);
+		this.updateBbx(bmpdt,TextRender.pixelBBX,false);
+		bmpdt=this.charRender.getCharBmp('国',fontstr,0,'red',null,TextRender.tmpRI,oriy,oriy,marginr,marginb);
+		if (Render.isConchApp){
+			bmpdt.data=new /*__JS__ */Uint8ClampedArray(bmpdt.data);
+		}
+		this.bmpData32=new Uint32Array(bmpdt.data.buffer);
+		if (TextRender.pixelBBX[2] < orix+TextRender.tmpRI.width)
+			TextRender.pixelBBX[2]=orix+TextRender.tmpRI.width;
+		this.updateBbx(bmpdt,TextRender.pixelBBX,false);
+		if (Render.isConchApp){
+			orix=0;
+			oriy=0;
+		};
+		var xoff=Math.max(orix-TextRender.pixelBBX[0],0);
+		var yoff=Math.max(oriy-TextRender.pixelBBX[1],0);
+		var bbxw=TextRender.pixelBBX[2]-TextRender.pixelBBX[0];
+		var bbxh=TextRender.pixelBBX[3]-TextRender.pixelBBX[1];
+		var sizeinfo=xoff<<24 |yoff<<16 | bbxw << 8 | bbxh;
+		this.fontSizeInfo[font]=sizeinfo;
+		return sizeinfo;
+	}
+
+	__proto.printDbgInfo=function(){
+		console.log('图集个数:'+this.textAtlases.length+',每个图集大小:'+TextRender.atlasWidth+'x'+TextRender.atlasWidth,' 用canvas:',TextRender.isWan1Wan);
+		console.log('图集占用空间:'+(TextRender.atlasWidth *TextRender.atlasWidth *4 / 1024 / 1024 *this.textAtlases.length)+'M');
+		console.log('缓存用到的字体:');
+		for (var f in this.mapFont){
+			var fontsz=this.getFontSizeInfo(f);
+			var offx=fontsz >> 24;
+			var offy=(fontsz >> 16)& 0xff;
+			var fw=(fontsz >> 8)& 0xff;
+			var fh=fontsz & 0xff;
+			console.log('    '+f,' off:',offx,offy,' size:',fw,fh);
+		};
+		var num=0;
+		console.log('缓存数据:');
+		var totalUsedRate=0;
+		var totalUsedRateAtlas=0;
+		this.textAtlases.forEach(function(a){
+			var id=a.texture.id;
+			var dt=Stat.loopCount-a.texture.lastTouchTm;
+			var dtstr=dt > 0?(''+dt+'帧以前'):'当前帧';
+			totalUsedRate+=a.texture.curUsedCovRate;
+			totalUsedRateAtlas+=a.texture.curUsedCovRateAtlas;
+			console.log('--图集(id:'+id+',当前使用率:'+(a.texture.curUsedCovRate*1000|0)+'‰','当前图集使用率:',(a.texture.curUsedCovRateAtlas*100|0)+'%','图集使用率:',(a.usedRate*100|0),'%, 使用于:'+dtstr+')--:');
+			for (var k in a.charMaps){
+				var ri=a.charMaps[k];
+				console.log('     off:',ri.orix,ri.oriy,' bmp宽高:',ri.bmpWidth,ri.bmpHeight,'无效:',ri.deleted,'touchdt:',(Stat.loopCount-ri.touchTick),'位置:',ri.uv[0] *TextRender.atlasWidth | 0,ri.uv[1] *TextRender.atlasWidth | 0,
+				'字符:',ri.char,'key:',k);
+				num++;
+			}
+		});
+		console.log('独立贴图文字('+this.isoTextures.length+'个):');
+		this.isoTextures.forEach(function(tex){
+			console.log('    size:',tex._texW,tex._texH,'touch间隔:',(Stat.loopCount-tex.lastTouchTm),'char:',tex.ri.char);
+		});
+		console.log('总缓存:',num,'总使用率:',totalUsedRate,'总当前图集使用率:',totalUsedRateAtlas);
+	}
+
+	// 在屏幕上显示某个大图集
+	__proto.showAtlas=function(n,bgcolor,x,y,w,h){
+		if (!this.textAtlases[n]){
+			console.log('没有这个图集');
+			return null;
+		};
+		var sp=new Sprite();
+		var texttex=this.textAtlases[n].texture;
+		var texture={
+			width:TextRender.atlasWidth,
+			height:TextRender.atlasWidth,
+			sourceWidth:TextRender.atlasWidth,
+			sourceHeight:TextRender.atlasWidth,
+			offsetX:0,
+			offsetY:0,
+			getIsReady:function (){return true;},
+			_addReference:function (){},
+			_removeReference:function (){},
+			_getSource:function (){return texttex._getSource();},
+			bitmap:{id:texttex.id },
+			_uv:Texture.DEF_UV
+		};
+		(sp).size=function (w,h){
+			this.width=w;
+			this.height=h;
+			sp.graphics.clear();
+			sp.graphics.drawRect(0,0,sp.width,sp.height,bgcolor);
+			sp.graphics.drawTexture(texture,0,0,sp.width,sp.height);
+			return this;
+		}
+		sp.graphics.drawRect(0,0,w,h,bgcolor);
+		sp.graphics.drawTexture(texture,0,0,w,h);
+		sp.pos(x,y);
+		Laya.stage.addChild(sp);
+		return sp;
+	}
+
+	/////// native ///////
+	__proto.filltext_native=function(ctx,data,htmlchars,x,y,fontStr,color,strokeColor,lineWidth,textAlign,underLine){
+		(underLine===void 0)&& (underLine=0);
+		if (data && data.length <=0)return;
+		if (htmlchars && htmlchars.length < 1)return;
+		var font=FontInfo.Parse(fontStr);
+		var nTextAlign=0;
+		switch (textAlign){
+			case 'center':
+				nTextAlign=Context.ENUM_TEXTALIGN_CENTER;
+				break ;
+			case 'right':
+				nTextAlign=Context.ENUM_TEXTALIGN_RIGHT;
+				break ;
+			}
+		return this._fast_filltext(ctx,data,htmlchars,x,y,font,color,strokeColor,lineWidth,nTextAlign,underLine);
+	}
+
+	TextRender.useOldCharBook=false;
+	TextRender.atlasWidth=2048;
+	TextRender.noAtlas=false;
+	TextRender.forceSplitRender=false;
+	TextRender.forceWholeRender=false;
+	TextRender.scaleFontWithCtx=true;
+	TextRender.standardFontSize=32;
+	TextRender.destroyAtlasDt=10;
+	TextRender.checkCleanTextureDt=2000;
+	TextRender.destroyUnusedTextureDt=3000;
+	TextRender.cleanMem=100 *1024 *1024;
+	TextRender.isWan1Wan=false;
+	TextRender.showLog=false;
+	TextRender.debugUV=false;
+	TextRender.atlasWidth2=2048 *2048;
+	TextRender.textRenderInst=null;
+	TextRender.simClean=false;
+	__static(TextRender,
+	['tmpRI',function(){return this.tmpRI=new CharRenderInfo();},'pixelBBX',function(){return this.pixelBBX=[0,0,0,0];},'imgdtRect',function(){return this.imgdtRect=[0,0,0,0];}
+	]);
+	return TextRender;
 })()
 
 
@@ -1795,6 +2684,79 @@ var ShaderDefinesBase=(function(){
 })()
 
 
+//class laya.webgl.utils.ShaderNode
+var ShaderNode=(function(){
+	function ShaderNode(includefiles){
+		this.childs=[];
+		this.text="";
+		this.parent=null;
+		this.name=null;
+		this.noCompile=false;
+		this.includefiles=null;
+		this.condition=null;
+		this.conditionType=0;
+		this.useFuns="";
+		this.z=0;
+		this.src=null;
+		this.includefiles=includefiles;
+	}
+
+	__class(ShaderNode,'laya.webgl.utils.ShaderNode');
+	var __proto=ShaderNode.prototype;
+	__proto.setParent=function(parent){
+		parent.childs.push(this);
+		this.z=parent.z+1;
+		this.parent=parent;
+	}
+
+	__proto.setCondition=function(condition,type){
+		if (condition){
+			this.conditionType=type;
+			condition=condition.replace(/(\s*$)/g,"");
+			this.condition=function (){
+				return this[condition];
+			}
+			this.condition.__condition=condition;
+		}
+	}
+
+	__proto.toscript=function(def,out){
+		return this._toscript(def,out,++ShaderNode.__id);
+	}
+
+	__proto._toscript=function(def,out,id){
+		if (this.childs.length < 1 && !this.text)return out;
+		var outIndex=out.length;
+		if (this.condition){
+			var ifdef=!!this.condition.call(def);
+			this.conditionType===/*laya.webgl.utils.ShaderCompile.IFDEF_ELSE*/2 && (ifdef=!ifdef);
+			if (!ifdef)return out;
+		}
+		this.text && out.push(this.text);
+		this.childs.length > 0 && this.childs.forEach(function(o,index,arr){
+			o._toscript(def,out,id);
+		});
+		if (this.includefiles.length > 0 && this.useFuns.length > 0){
+			var funsCode;
+			for (var i=0,n=this.includefiles.length;i < n;i++){
+				if (this.includefiles[i].curUseID==id){
+					continue ;
+				}
+				funsCode=this.includefiles[i].file.getFunsScript(this.useFuns);
+				if (funsCode.length > 0){
+					this.includefiles[i].curUseID=id;
+					out[0]=funsCode+out[0];
+				}
+			}
+		}
+		return out;
+	}
+
+	ShaderNode.__id=1;
+	return ShaderNode;
+})()
+
+
 /**
 *...
 *@author ww
@@ -2246,7 +3208,7 @@ var ICharRender=(function(){
 	function ICharRender(){}
 	__class(ICharRender,'laya.webgl.resource.ICharRender');
 	var __proto=ICharRender.prototype;
-	__proto.getWidth=function(str){return 0;}
+	__proto.getWidth=function(font,str){return 0;}
 	__proto.scale=function(sx,sy){}
 	/**
 	*TODO stroke
@@ -2255,9 +3217,14 @@ var ICharRender=(function(){
 	*@param size 返回宽高
 	*@return
 	*/
-	__proto.getCharBmp=function(char,font,lineWidth,colStr,strokeColStr,size,margin_left,margin_top,margin_right,margin_bottom){
+	__proto.getCharBmp=function(char,font,lineWidth,colStr,strokeColStr,size,margin_left,margin_top,margin_right,margin_bottom,rect){
 		return null;
 	}
+
+	__getset(0,__proto,'canvasWidth',function(){
+		return 0;
+		},function(w){
+	});
 
 	return ICharRender;
 })()
@@ -2353,6 +3320,7 @@ var CharPages=(function(){
 		if (this._gridW <=0){
 			console.error("文字太大,需要修改texture大小");
 			debugger;
+			this._gridW=1;
 		}
 		this._gridNum=this._gridW *this._gridW;
 		console.log('gridInfo:slotW='+this._slotW+',gridw='+this._gridW+',gridNum='+this._gridNum+',textureW='+this._textureWidth);
@@ -2361,7 +3329,7 @@ var CharPages=(function(){
 	__class(CharPages,'laya.webgl.resource.CharPages');
 	var __proto=CharPages.prototype;
 	__proto.getWidth=function(str){
-		return CharPages.charRender.getWidth(str);
+		return CharPages.charRender.getWidth(CharBook._curFont,str);
 	}
 
 	/**
@@ -2402,15 +3370,7 @@ var CharPages=(function(){
 			return this.getSpaceChar(touch);
 		var key=(lineWidth > 0?(str+'_'+lineWidth+strokeColor):str);
 		var ret;
-		color=color & 0xffffff;
-		strokeColor=strokeColor & 0xffffff;
-		if (CharBook.getFontBmpWithColor){
-			if (color===0xffffff)key=key+'#w';
-			else if (color===0xff0000)key=key+'#b';
-			else if (color===0xfff00)key=key+'#g';
-			else if (color===0xff)key=key+'#r';
-			else key+='#'+color.toString(16);
-		}
+		key+=color;
 		bold && (key+='B');
 		scalekey && (key+=scalekey);
 		for (var i=0,sz=this.pages.length;i < sz;i++){
@@ -2424,26 +3384,15 @@ var CharPages=(function(){
 				}
 			}
 		}
-		ret=new CharRenderInfo();
-		this._getASlot(ret);
+		ret=this._getASlot();
+		if (!ret)
+			return null;
 		var charmaps=ret.tex.charMaps[this._selectedSizeIdx];
 		(!charmaps)&& (charmaps=ret.tex.charMaps[this._selectedSizeIdx]=new Map());
 		charmaps.set(key,ret);
 		touch && ret.touch();
-		var colStr='';
-		var strokeColStr='';
-		if (CharBook.getFontBmpWithColor){
-			colStr=((color&0xff00)+((color&0xff)<<16)+((color&0xff0000)>>16)).toString(16);
-			colStr='#000000'.substr(0,7-colStr.length)+colStr;
-			if(lineWidth){
-				strokeColStr=((strokeColor&0xff00)+((strokeColor&0xff)<<16)+((strokeColor&0xff0000)>>16)).toString(16);
-				strokeColStr='#000000'.substr(0,7-strokeColStr.length)+strokeColStr;
-			}
-		}
 		ret.height=fontsize;
-		var bmp=this.getCharBmp(str,CharBook._curFont,lineWidth,colStr,strokeColStr,ret);
-		ret.bmpWidth=bmp.width;
-		ret.bmpHeight=bmp.height;
+		var bmp=this.getCharBmp(str,CharBook._curFont,lineWidth,color,strokeColor,ret);
 		var cy=Math.floor(ret.pos / this._gridW);
 		var cx=ret.pos % this._gridW;
 		var _curX=cx *this._slotW;
@@ -2466,26 +3415,25 @@ var CharPages=(function(){
 	*从所有的page中找一个空格子
 	*如果没有地方了，就创建一个新的charpageTexture
 	*/
-	__proto._getASlot=function(ret){
+	__proto._getASlot=function(){
 		var sz=this.pages.length;
 		var cp;
+		var ret;
 		var pos=0;
 		for (var i=0;i < sz;i++){
 			cp=this.pages[i];
-			pos=cp.findAGrid();
-			if (pos>=0){
-				ret.tex=cp;
-				ret.pos=pos
-				return;
+			ret=cp.findAGrid();
+			if (ret){
+				return ret;
 			}
 		}
 		cp=CharBook.trash.getAPage(this._gridNum);
 		this.pages.push(cp);
-		pos=cp.findAGrid();
-		if (pos==-1)
-			throw "_getASlot error!";
-		ret.tex=cp;
-		ret.pos=pos;
+		ret=cp.findAGrid();
+		if (!ret){
+			console.error("_getASlot error!");
+		}
+		return ret;
 	}
 
 	//TODO:coverage
@@ -2511,13 +3459,13 @@ var CharPages=(function(){
 
 	//TODO:coverage
 	__proto.removeLRU=function(){
-		var cp;
 		var freed=this._gridNum *this.pages.length-this.getAllPageScore();
 		if (freed>=this._gridNum){
 			if (this._minScoreID >=0){
-				console.log('remove font page '+this._minScoreID);
-				cp=this.pages[this._minScoreID];
+				var cp=this.pages[this._minScoreID];
+				console.log('remove fontpage: delpageid='+this._minScoreID+', total='+this.pages.length+',gcCnt:'+(this.gcCnt+1));
 				var used=cp._score;
+				cp.printDebugInfo();
 				CharBook.trash.discardPage(cp);
 				this.pages[this._minScoreID]=this.pages[this.pages.length-1];
 				this.pages.pop();
@@ -2525,6 +3473,7 @@ var CharPages=(function(){
 				var i=0,sz=this.pages.length;
 				for(;i < sz && used > 0;i++){
 					cp=this.pages[i];
+					console.log('clean page '+i);
 					var cleaned=cp.removeOld(curloop);
 					used-=cleaned;
 				}
@@ -2538,6 +3487,23 @@ var CharPages=(function(){
 	//TODO:coverage
 	__proto.getCharBmp=function(char,font,lineWidth,colStr,strokeColStr,size){
 		return CharPages.charRender.getCharBmp(char,font,lineWidth,colStr,strokeColStr,size,this.margin_left,this.margin_top,this.margin_right,this.margin_bottom);
+	}
+
+	// for debug
+	__proto.printPagesInfo=function(){
+		console.log('拥有页数: ',this.pages.length);
+		console.log('基本大小:',this._baseSize);
+		console.log('格子宽度:',this._slotW);
+		console.log('每行格子数:',this._gridW);
+		console.log('贴图大小:',this._textureWidth);
+		console.log('    边界:',this.margin_left,this.margin_top);
+		console.log('得分最少页:',this._minScoreID);
+		console.log('  GC次数:',this.gcCnt);
+		console.log(' -------页信息-------');
+		this.pages.forEach(function(cp){
+			cp.printDebugInfo(true);
+		});
+		console.log(' -----页信息结束-------');
 	}
 
 	CharPages.getBmpSize=function(fonstsize){
@@ -3445,7 +4411,6 @@ var DrawRectCmdNative=(function(){
 */
 //class laya.webgl.utils.ShaderCompile
 var ShaderCompile=(function(){
-	var ShaderNode,InlcudeFile;
 	function ShaderCompile(vs,ps,nameMap,defs){
 		//this._nameMap=null;
 		//this._VS=null;
@@ -3467,6 +4432,9 @@ var ShaderCompile=(function(){
 
 	__class(ShaderCompile,'laya.webgl.utils.ShaderCompile');
 	var __proto=ShaderCompile.prototype;
+	/**
+	*@private
+	*/
 	__proto._compileToTree=function(parent,lines,start,includefiles,defs){
 		var node,preNode;
 		var text,name,fname;
@@ -3725,132 +4693,6 @@ var ShaderCompile=(function(){
 	__static(ShaderCompile,
 	['shaderParamsMap',function(){return this.shaderParamsMap={"float":/*laya.webgl.WebGLContext.FLOAT*/0x1406,"int":/*laya.webgl.WebGLContext.INT*/0x1404,"bool":/*laya.webgl.WebGLContext.BOOL*/0x8B56,"vec2":/*laya.webgl.WebGLContext.FLOAT_VEC2*/0x8B50,"vec3":/*laya.webgl.WebGLContext.FLOAT_VEC3*/0x8B51,"vec4":/*laya.webgl.WebGLContext.FLOAT_VEC4*/0x8B52,"ivec2":/*laya.webgl.WebGLContext.INT_VEC2*/0x8B53,"ivec3":/*laya.webgl.WebGLContext.INT_VEC3*/0x8B54,"ivec4":/*laya.webgl.WebGLContext.INT_VEC4*/0x8B55,"bvec2":/*laya.webgl.WebGLContext.BOOL_VEC2*/0x8B57,"bvec3":/*laya.webgl.WebGLContext.BOOL_VEC3*/0x8B58,"bvec4":/*laya.webgl.WebGLContext.BOOL_VEC4*/0x8B59,"mat2":/*laya.webgl.WebGLContext.FLOAT_MAT2*/0x8B5A,"mat3":/*laya.webgl.WebGLContext.FLOAT_MAT3*/0x8B5B,"mat4":/*laya.webgl.WebGLContext.FLOAT_MAT4*/0x8B5C,"sampler2D":/*laya.webgl.WebGLContext.SAMPLER_2D*/0x8B5E,"samplerCube":/*laya.webgl.WebGLContext.SAMPLER_CUBE*/0x8B60};},'_splitToWordExps3',function(){return this._splitToWordExps3=new RegExp("[ \\t=\\+\\-*/&%!<>!%\(\),;\\|]","g");}
 	]);
-	ShaderCompile.__init$=function(){
-		//class ShaderNode
-		ShaderNode=(function(){
-			function ShaderNode(includefiles){
-				this.childs=[];
-				this.text="";
-				this.parent=null;
-				this.name=null;
-				this.noCompile=false;
-				this.includefiles=null;
-				this.condition=null;
-				this.conditionType=0;
-				this.useFuns="";
-				this.z=0;
-				this.src=null;
-				this.includefiles=includefiles;
-			}
-			__class(ShaderNode,'');
-			var __proto=ShaderNode.prototype;
-			__proto.setParent=function(parent){
-				parent.childs.push(this);
-				this.z=parent.z+1;
-				this.parent=parent;
-			}
-			__proto.setCondition=function(condition,type){
-				if (condition){
-					this.conditionType=type;
-					condition=condition.replace(/(\s*$)/g,"");
-					this.condition=function (){
-						return this[condition];
-					}
-					this.condition.__condition=condition;
-				}
-			}
-			__proto.toscript=function(def,out){
-				return this._toscript(def,out,++ShaderNode.__id);
-			}
-			__proto._toscript=function(def,out,id){
-				if (this.childs.length < 1 && !this.text)return out;
-				var outIndex=out.length;
-				if (this.condition){
-					var ifdef=!!this.condition.call(def);
-					this.conditionType===/*laya.webgl.utils.ShaderCompile.IFDEF_ELSE*/2 && (ifdef=!ifdef);
-					if (!ifdef)return out;
-				}
-				this.text && out.push(this.text);
-				this.childs.length > 0 && this.childs.forEach(function(o,index,arr){
-					o._toscript(def,out,id);
-				});
-				if (this.includefiles.length > 0 && this.useFuns.length > 0){
-					var funsCode;
-					for (var i=0,n=this.includefiles.length;i < n;i++){
-						if (this.includefiles[i].curUseID==id){
-							continue ;
-						}
-						funsCode=this.includefiles[i].file.getFunsScript(this.useFuns);
-						if (funsCode.length > 0){
-							this.includefiles[i].curUseID=id;
-							out[0]=funsCode+out[0];
-						}
-					}
-				}
-				return out;
-			}
-			ShaderNode.__id=1;
-			return ShaderNode;
-		})()
-		//class InlcudeFile
-		InlcudeFile=(function(){
-			function InlcudeFile(txt){
-				this.script=null;
-				this.codes={};
-				this.funs={};
-				this.curUseID=-1;
-				this.funnames="";
-				this.script=txt;
-				var begin=0,ofs=0,end=0;
-				while (true){
-					begin=txt.indexOf("#begin",begin);
-					if (begin < 0)break ;
-					end=begin+5;
-					while (true){
-						end=txt.indexOf("#end",end);
-						if (end < 0)break ;
-						if (txt.charAt(end+4)==='i')
-							end+=5;
-						else break ;
-					}
-					if (end < 0){
-						throw "add include err,no #end:"+txt;
-					}
-					ofs=txt.indexOf('\n',begin);
-					var words=ShaderCompile.splitToWords(txt.substr(begin,ofs-begin),null);
-					if (words[1]=='code'){
-						this.codes[words[2]]=txt.substr(ofs+1,end-ofs-1);
-						}else if (words[1]=='function'){
-						ofs=txt.indexOf("function",begin);
-						ofs+="function".length;
-						this.funs[words[3]]=txt.substr(ofs+1,end-ofs-1);
-						this.funnames+=words[3]+";";
-					}
-					begin=end+1;
-				}
-			}
-			__class(InlcudeFile,'');
-			var __proto=InlcudeFile.prototype;
-			__proto.getWith=function(name){
-				var r=name ? this.codes[name] :this.script;
-				if (!r){
-					throw "get with error:"+name;
-				}
-				return r;
-			}
-			__proto.getFunsScript=function(funsdef){
-				var r="";
-				for (var i in this.funs){
-					if (funsdef.indexOf(i+";")>=0){
-						r+=this.funs[i];
-					}
-				}
-				return r;
-			}
-			return InlcudeFile;
-		})()
-	}
-
 	return ShaderCompile;
 })()
 
@@ -4005,7 +4847,7 @@ var FillTextCmdNative=(function(){
 
 	FillTextCmdNative.ID="FillText";
 	__static(FillTextCmdNative,
-	['cbook',function(){return this.cbook=CharBook.charbookInst;}
+	['cbook',function(){return this.cbook=Laya['textRender'];}
 	]);
 	return FillTextCmdNative;
 })()
@@ -4183,7 +5025,7 @@ var WebGLContext=(function(){
 		if (!WebGL._isWebGL2){
 			VertexArrayObject;
 			if (window._setupVertexArrayObject){
-				if (Browser.onMiniGame)
+				if (Browser.onMiniGame||Browser.onLimixiu)
 					window._forceSetupVertexArrayObject(gl);
 				else
 				window._setupVertexArrayObject(gl);
@@ -4956,10 +5798,12 @@ var DrawCurvesCmdNative=(function(){
 //class laya.webgl.resource.CharRenderInfo
 var CharRenderInfo=(function(){
 	function CharRenderInfo(){
+		this.char='';
+		// 调试用
 		this.tex=null;
 		//
-		this.uv=[0,0,1,1];
-		//uv
+		this.deleted=false;
+		// [0,0,1,1];//uv
 		this.pos=0;
 		//数组下标
 		this.width=0;
@@ -4969,9 +5813,13 @@ var CharRenderInfo=(function(){
 		this.bmpWidth=0;
 		//实际图片的宽度。可能与排版用的width不一致。包含缩放和margin
 		this.bmpHeight=0;
+		this.orix=0;
+		// 原点位置，通常都是所在区域的左上角
+		this.oriy=0;
 		this.touchTick=0;
 		//
 		this.isSpace=false;
+		this.uv=new Array(8);
 	}
 
 	__class(CharRenderInfo,'laya.webgl.resource.CharRenderInfo');
@@ -4979,12 +5827,8 @@ var CharRenderInfo=(function(){
 	//是否是空格，如果是空格，则只有width有效
 	__proto.touch=function(){
 		var curLoop=Stat.loopCount;
-		if (this.tex._scoreTick !=curLoop){
-			this.tex._score=0;
-			this.tex._scoreTick=curLoop;
-		}
 		if (this.touchTick !=curLoop){
-			this.tex._score++;
+			this.tex.touchRect(this,curLoop);
 		}
 		this.touchTick=curLoop;
 	}
@@ -5306,7 +6150,7 @@ var SubmitTarget=(function(){
 			this.shaderValue.texture=target._getSource();
 			this.shaderValue.upload();
 			this.blend();
-			Stat.drawCall++;
+			Stat.renderBatch++;
 			Stat.trianglesFaces+=this._numEle/3;
 			WebGL.mainContext.drawElements(/*laya.webgl.WebGLContext.TRIANGLES*/0x0004,this._numEle,/*laya.webgl.WebGLContext.UNSIGNED_SHORT*/0x1403,this._startIdx);
 		}
@@ -5921,14 +6765,13 @@ var Submit=(function(){
 			BlendMode.activeBlendFunction=this._blendFn;
 		}
 		gl.drawElements(/*laya.webgl.WebGLContext.TRIANGLES*/0x0004,this._numEle,/*laya.webgl.WebGLContext.UNSIGNED_SHORT*/0x1403,this._startIdx);
-		Stat.drawCall++;
+		Stat.renderBatch++;
 		Stat.trianglesFaces+=this._numEle / 3;
 		return 1;
 	}
 
 	//TODO:coverage
-	__proto._cloneInit=function(o,context,mesh,pos){
-		debugger;
+	__proto._cloneInit=function(o,context,mesh,pos){;
 		o._ref=1;
 		o._mesh=mesh;
 		o._id=this._id;
@@ -5944,14 +6787,12 @@ var Submit=(function(){
 	}
 
 	//TODO:coverage
-	__proto.clone=function(context,mesh,pos){
-		debugger;
+	__proto.clone=function(context,mesh,pos){;
 		return null;
 	}
 
 	//TODO:coverage
-	__proto.reUse=function(context,pos){
-		debugger;
+	__proto.reUse=function(context,pos){;
 		return 0;
 	}
 
@@ -5967,8 +6808,7 @@ var Submit=(function(){
 		s._ref=0xFFFFFFFF;
 	}
 
-	Submit.create=function(context,mesh,sv){
-		debugger;
+	Submit.create=function(context,mesh,sv){;
 		var o=Submit._poolSize ? Submit.POOL[--Submit._poolSize] :new Submit();
 		o._ref=1;
 		o._mesh=mesh;
@@ -5993,6 +6833,7 @@ var Submit=(function(){
 		o.shaderValue=sv;
 		o.shaderValue.setValue(ctx._shader2D);
 		var blendType=ctx._nBlendType;
+		o._key.blendShader=blendType;
 		o._blendFn=ctx._targets ? BlendMode.targetFns[blendType] :BlendMode.fns[blendType];
 		return o;
 	}
@@ -6097,7 +6938,10 @@ var WebGL=(function(){
 			return;
 		WebGL.isNativeRender_enable=true;
 		HTMLImage.create=function (width,height){
-			return new Texture2D(width,height,/*laya.webgl.resource.BaseTexture.FORMAT_R8G8B8A8*/1,false,false);
+			var tex=new Texture2D(width,height,/*laya.webgl.resource.BaseTexture.FORMAT_R8G8B8A8*/1,false,false);
+			tex.wrapModeU=/*laya.webgl.resource.BaseTexture.WARPMODE_CLAMP*/1;
+			tex.wrapModeV=/*laya.webgl.resource.BaseTexture.WARPMODE_CLAMP*/1;
+			return tex;
 		}
 		WebGLContext.__init_native();
 		RenderState2D.width=Browser.window.innerWidth;
@@ -6112,8 +6956,8 @@ var WebGL=(function(){
 			stage.prototype.repaint=stage.prototype.repaintForNative;
 			stage.prototype.render=stage.prototype.renderToNative;
 			var bufferStateBase=BufferStateBase;
-			bufferStateBase.prototype.bind=bufferStateBase.prototype.bindForNative;
-			bufferStateBase.prototype.unBind=bufferStateBase.prototype.unBindForNative;
+			bufferStateBase.prototype.bind=BufferStateBase.prototype.bindForNative;
+			bufferStateBase.prototype.unBind=BufferStateBase.prototype.unBindForNative;
 			if (Render.isConchApp){
 				/*__JS__ */CommandEncoder=window.GLCommandEncoder;
 				/*__JS__ */LayaGL=window.LayaGLContext;
@@ -6138,9 +6982,16 @@ var WebGL=(function(){
 				prototypeContext.toBase64=protoLast.toBase64;
 				prototypeContext.getImageData=protoLast.getImageData;
 				/*__JS__ */__getset (0,prototypeContext,'asBitmap',prototypeContext._$get_asBitmap,prototypeContext._$set_asBitmap);
+				ConchPropertyAdpt.rewriteProperties();
 			}
 			ConchSpriteAdpt.init();
 			LayaNative2D.__init__();
+		}
+		RunDriver.clear=function (color){
+			var c=ColorUtils.create(color).arrColor;
+			var gl=LayaGL.instance;
+			if (c)gl.clearColor(c[0],c[1],c[2],c[3]);
+			gl.clear(/*laya.webgl.WebGLContext.COLOR_BUFFER_BIT*/0x00004000 | /*laya.webgl.WebGLContext.DEPTH_BUFFER_BIT*/0x00000100 | /*laya.webgl.WebGLContext.STENCIL_BUFFER_BIT*/0x00000400);
 		}
 		RunDriver.drawToCanvas=function (sprite,_renderType,canvasWidth,canvasHeight,offsetX,offsetY){
 			var canvas=new HTMLCanvas(true);
@@ -6156,8 +7007,12 @@ var WebGL=(function(){
 			context.beginRT();
 			layagl.save();
 			var temp=ConchSpriteAdpt._tempFloatArrayMatrix;
-			temp[0]=1;temp[1]=0;temp[2]=0;temp[3]=1;
-			temp[4]=offsetX;temp[5]=offsetY;
+			temp[0]=1;
+			temp[1]=0;
+			temp[2]=0;
+			temp[3]=1;
+			temp[4]=offsetX;
+			temp[5]=offsetY;
 			layagl.setGlobalValue(LayaNative2D.GLOBALVALUE_MATRIX32,/*laya.layagl.LayaGL.VALUE_OPERATE_SET*/8,temp);
 			(sprite).writeBlockToNative();
 			layagl.restore();
@@ -6225,7 +7080,10 @@ var WebGL=(function(){
 			return true;
 		}
 		HTMLImage.create=function (width,height){
-			return new Texture2D(width,height,/*laya.webgl.resource.BaseTexture.FORMAT_R8G8B8A8*/1,false,false);
+			var tex=new Texture2D(width,height,/*laya.webgl.resource.BaseTexture.FORMAT_R8G8B8A8*/1,false,false);
+			tex.wrapModeU=/*laya.webgl.resource.BaseTexture.WARPMODE_CLAMP*/1;
+			tex.wrapModeV=/*laya.webgl.resource.BaseTexture.WARPMODE_CLAMP*/1;
+			return tex;
 		}
 		RunDriver.createRenderSprite=function (type,next){
 			return new RenderSprite3D(type,next);
@@ -6234,6 +7092,7 @@ var WebGL=(function(){
 			laya.webgl.WebGL.onStageResize(width,height);
 		}
 		RunDriver.clear=function (color){
+			WebGLContext2D.set2DRenderConfig();
 			RenderState2D.worldScissorTest && laya.webgl.WebGL.mainContext.disable(/*laya.webgl.WebGLContext.SCISSOR_TEST*/0x0C11);
 			var ctx=Render.context;
 			var c=(ctx._submits._length==0 || Config.preserveDrawingBuffer)? ColorUtils.create(color).arrColor :Laya.stage._wgColor;
@@ -6243,7 +7102,10 @@ var WebGL=(function(){
 		RunDriver.drawToCanvas=function (sprite,_renderType,canvasWidth,canvasHeight,offsetX,offsetY){
 			offsetX-=sprite.x;
 			offsetY-=sprite.y;
-			offsetX |=0;offsetY |=0;canvasWidth |=0;canvasHeight |=0;
+			offsetX |=0;
+			offsetY |=0;
+			canvasWidth |=0;
+			canvasHeight |=0;
 			var ctx=new WebGLContext2D();
 			ctx.size(canvasWidth,canvasHeight);
 			ctx.asBitmap=true;
@@ -6273,8 +7135,66 @@ var WebGL=(function(){
 			return canv;
 		}
 		RunDriver.getTexturePixels=function (value,x,y,width,height){
-			alert('由于编不过，注掉了');
-			return null;
+			var st=0,dst=0,i=0;
+			var tex2d=value.bitmap;
+			var texw=tex2d.width;
+			var texh=tex2d.height;
+			if (x+width > texw)width-=(x+width)-texw;
+			if (y+height > texh)height-=(y+height)-texh;
+			if (width <=0 || height <=0)return null;
+			var wstride=width *4;
+			var pix=null;
+			try {
+				pix=tex2d.getPixels();
+			}catch (e){}
+			if (pix){
+				if(x==0&&y==0&&width==texw&&height==texh)
+					return pix;
+				var ret=new Uint8Array(width *height *4);
+				wstride=texw *4;
+				st=x*4;
+				dst=(y+height-1)*wstride+x*4;
+				for (i=height-1;i >=0;i--){
+					ret.set(dt.slice(dst,dst+width*4),st);
+					st+=wstride;
+					dst-=wstride;
+				}
+				return ret;
+			};
+			var ctx=new WebGLContext2D();
+			ctx.size(width,height);
+			ctx.asBitmap=true;
+			var uv=null;
+			if (x !=0 || y !=0 || width !=texw || height !=texh){
+				uv=value.uv.concat();
+				var stu=uv[0];
+				var stv=uv[1];
+				var uvw=uv[2]-stu;
+				var uvh=uv[7]-stv;
+				var uk=uvw / texw;
+				var vk=uvh / texh;
+				uv=[
+				stu+x *uk,stv+y *vk,
+				stu+(x+width)*uk,stv+y *vk,
+				stu+(x+width)*uk,stv+(y+height)*vk,
+				stu+x *uk,stv+(y+height)*vk,];
+			}
+			(ctx)._drawTextureM(value,0,0,width,height,null,1.0,uv);
+			ctx._targets.start();
+			ctx.flush();
+			ctx._targets.end();
+			ctx._targets.restore();
+			var dt=ctx._targets.getData(0,0,width,height);
+			ctx.destroy();
+			ret=new Uint8Array(width *height *4);
+			st=0;
+			dst=(height-1)*wstride;
+			for (i=height-1;i >=0;i--){
+				ret.set(dt.slice(dst,dst+wstride),st);
+				st+=wstride;
+				dst-=wstride;
+			}
+			return ret;
 		}
 		Filter._filter=function (sprite,context,x,y){
 			var webglctx=context;
@@ -6297,6 +7217,7 @@ var WebGL=(function(){
 				var tPadding=0;
 				var tHalfPadding=0;
 				var tIsHaveGlowFilter=false;
+				var source=null;
 				var out=sprite._cacheStyle.filterCache || null;
 				if (!out || sprite.getRepaint()!=0){
 					tIsHaveGlowFilter=sprite._isHaveGlowFilter();
@@ -6326,8 +7247,8 @@ var WebGL=(function(){
 						return;
 					}
 					out && WebGLRTMgr.releaseRT(out);
-					var source=WebGLRTMgr.getRT(b.width,b.height);
-					var outRT=WebGLRTMgr.getRT(b.width,b.height);
+					source=WebGLRTMgr.getRT(b.width,b.height);
+					var outRT=out=WebGLRTMgr.getRT(b.width,b.height);
 					sprite._getCacheStyle().filterCache=out;
 					webglctx.pushRT();
 					webglctx.useRT(source);
@@ -6342,7 +7263,7 @@ var WebGL=(function(){
 							webglctx.useRT(outRT);
 						};
 						var fil=filters[i];
-						switch(fil.type){
+						switch (fil.type){
 							case /*laya.filters.Filter.BLUR*/0x10:
 								fil._glRender && fil._glRender.render(source,context,b.width,b.height,fil);
 								break ;
@@ -6384,7 +7305,14 @@ var WebGL=(function(){
 				mat.transformPoint(p);
 				x=p.x+b.x;
 				y=p.y+b.y;
-				webglctx._drawRenderTexture(outRT,x,y,b.width,b.height,Matrix.TEMP.identity(),1.0,RenderTexture2D.defuv);
+				webglctx._drawRenderTexture(out,x,y,b.width,b.height,Matrix.TEMP.identity(),1.0,RenderTexture2D.defuv);
+				if(source){
+					var submit=SubmitCMD.create([source],function(s){
+						s.destroy();
+					},this);
+					source=null;
+					context.addRenderObject(submit);
+				}
 				mat.destroy();
 			}
 		}
@@ -6580,6 +7508,51 @@ var Path=(function(){
 	}
 
 	return Path;
+})()
+
+
+//class laya.webgl.utils.Buffer
+var Buffer=(function(){
+	function Buffer(){
+		//当前gl绑定的indexBuffer
+		this._glBuffer=null;
+		this._buffer=null;
+		//可能为Float32Array、Uint16Array、Uint8Array、ArrayBuffer等。
+		this._bufferType=0;
+		this._bufferUsage=0;
+		this._byteLength=0;
+		this._glBuffer=LayaGL.instance.createBuffer()
+	}
+
+	__class(Buffer,'laya.webgl.utils.Buffer');
+	var __proto=Buffer.prototype;
+	/**
+	*@private
+	*绕过全局状态判断,例如VAO局部状态设置
+	*/
+	__proto._bindForVAO=function(){}
+	//TODO:coverage
+	__proto.bind=function(){
+		return false;
+	}
+
+	/**
+	*@private
+	*/
+	__proto.destroy=function(){
+		if (this._glBuffer){
+			LayaGL.instance.deleteBuffer(this._glBuffer);
+			this._glBuffer=null;
+		}
+	}
+
+	__getset(0,__proto,'bufferUsage',function(){
+		return this._bufferUsage;
+	});
+
+	Buffer._bindedVertexBuffer=null;
+	Buffer._bindedIndexBuffer=null;
+	return Buffer;
 })()
 
 
@@ -6842,7 +7815,7 @@ var FillWordsCmdNative=(function(){
 
 	FillWordsCmdNative.ID="FillWords";
 	__static(FillWordsCmdNative,
-	['cbook',function(){return this.cbook=CharBook.charbookInst;}
+	['cbook',function(){return this.cbook=Laya['textRender'];}
 	]);
 	return FillWordsCmdNative;
 })()
@@ -7347,13 +8320,13 @@ var Shader2D=(function(){
 
 	Shader2D.__init__=function(){
 		var vs,ps;
-		vs="/*\n	texture和fillrect使用的。\n*/\nattribute vec4 posuv;\nattribute vec4 attribColor;\nattribute vec4 attribFlags;\n//attribute vec4 clipDir;\n//attribute vec2 clipRect;\nuniform vec4 clipMatDir;\nuniform vec2 clipMatPos;\nvarying vec2 cliped;\nuniform vec2 size;\n\n#ifdef WORLDMAT\n	uniform mat4 mmat;\n#endif\n\nvarying vec4 v_texcoordAlpha;\nvarying vec4 v_color;\nvarying float v_useTex;\n\nvoid main() {\n\n#ifdef WORLDMAT\n	vec4 pos=mmat*vec4(posuv.xy,0.,1.);\n	gl_Position =vec4((pos.x/size.x-0.5)*2.0,(0.5-pos.y/size.y)*2.0,0.,1.0);\n#else\n	gl_Position =vec4((posuv.x/size.x-0.5)*2.0,(0.5-posuv.y/size.y)*2.0,0.,1.0);\n#endif\n  \n	v_texcoordAlpha.xy = posuv.zw;\n	//v_texcoordAlpha.z = attribColor.a/255.0;\n	v_color = attribColor/255.0;\n	v_color.xyz*=v_color.w;//反正后面也要预乘\n	\n	v_useTex = attribFlags.r/255.0;\n	float clipw = length(clipMatDir.xy);\n	float cliph = length(clipMatDir.zw);\n	vec2 clippos = posuv.xy - clipMatPos.xy;	//pos已经应用矩阵了，为了减的有意义，clip的位置也要缩放\n	if(clipw>20000. && cliph>20000.)\n		cliped = vec2(0.5,0.5);\n	else {\n		//转成0到1之间。/clipw/clipw 表示clippos与normalize之后的clip朝向点积之后，再除以clipw\n		cliped=vec2( dot(clippos,clipMatDir.xy)/clipw/clipw, dot(clippos,clipMatDir.zw)/cliph/cliph);\n	}\n\n}";
+		vs="/*\n	texture和fillrect使用的。\n*/\nattribute vec4 posuv;\nattribute vec4 attribColor;\nattribute vec4 attribFlags;\n//attribute vec4 clipDir;\n//attribute vec2 clipRect;\nuniform vec4 clipMatDir;\nuniform vec2 clipMatPos;		// 这个是全局的，不用再应用矩阵了。\nvarying vec2 cliped;\nuniform vec2 size;\n\n#ifdef WORLDMAT\n	uniform mat4 mmat;\n#endif\nuniform mat4 u_MvpMatrix;\n\nvarying vec4 v_texcoordAlpha;\nvarying vec4 v_color;\nvarying float v_useTex;\n\nvoid main() {\n\n	vec4 pos = vec4(posuv.xy,0.,1.);\n#ifdef WORLDMAT\n	pos=mmat*pos;\n#endif\n	vec4 pos1  =vec4((pos.x/size.x-0.5)*2.0,(0.5-pos.y/size.y)*2.0,0.,1.0);\n#ifdef MVP3D\n	gl_Position=u_MvpMatrix*pos1;\n#else\n	gl_Position=pos1;\n#endif\n	v_texcoordAlpha.xy = posuv.zw;\n	//v_texcoordAlpha.z = attribColor.a/255.0;\n	v_color = attribColor/255.0;\n	v_color.xyz*=v_color.w;//反正后面也要预乘\n	\n	v_useTex = attribFlags.r/255.0;\n	float clipw = length(clipMatDir.xy);\n	float cliph = length(clipMatDir.zw);\n	vec2 clippos = pos.xy - clipMatPos.xy;	//pos已经应用矩阵了，为了减的有意义，clip的位置也要缩放\n	if(clipw>20000. && cliph>20000.)\n		cliped = vec2(0.5,0.5);\n	else {\n		//转成0到1之间。/clipw/clipw 表示clippos与normalize之后的clip朝向点积之后，再除以clipw\n		cliped=vec2( dot(clippos,clipMatDir.xy)/clipw/clipw, dot(clippos,clipMatDir.zw)/cliph/cliph);\n	}\n\n}";
 		ps="/*\n	texture和fillrect使用的。\n*/\n\nprecision mediump float;\n//precision highp float;\nvarying vec4 v_texcoordAlpha;\nvarying vec4 v_color;\nvarying float v_useTex;\nuniform sampler2D texture;\nvarying vec2 cliped;\n\n#ifdef BLUR_FILTER\nuniform vec4 strength_sig2_2sig2_gauss1;\nuniform vec2 blurInfo;\n\n#define PI 3.141593\n\nfloat getGaussian(float x, float y){\n    return strength_sig2_2sig2_gauss1.w*exp(-(x*x+y*y)/strength_sig2_2sig2_gauss1.z);\n}\n\nvec4 blur(){\n    const float blurw = 9.0;\n    vec4 vec4Color = vec4(0.0,0.0,0.0,0.0);\n    vec2 halfsz=vec2(blurw,blurw)/2.0/blurInfo;    \n    vec2 startpos=v_texcoordAlpha.xy-halfsz;\n    vec2 ctexcoord = startpos;\n    vec2 step = 1.0/blurInfo;  //每个像素      \n    \n    for(float y = 0.0;y<=blurw; ++y){\n        ctexcoord.x=startpos.x;\n        for(float x = 0.0;x<=blurw; ++x){\n            //TODO 纹理坐标的固定偏移应该在vs中处理\n            vec4Color += texture2D(texture, ctexcoord)*getGaussian(x-blurw/2.0,y-blurw/2.0);\n            ctexcoord.x+=step.x;\n        }\n        ctexcoord.y+=step.y;\n    }\n    return vec4Color;\n}\n#endif\n\n#ifdef COLOR_FILTER\nuniform vec4 colorAlpha;\nuniform mat4 colorMat;\n#endif\n\n#ifdef GLOW_FILTER\nuniform vec4 u_color;\nuniform vec4 u_blurInfo1;\nuniform vec4 u_blurInfo2;\n#endif\n\n#ifdef COLOR_ADD\nuniform vec4 colorAdd;\n#endif\n\n//FILLTEXTURE\nuniform vec4 u_TexRange;//startu,startv,urange, vrange\n\nvoid main() {\n	if(cliped.x<0.) discard;\n	if(cliped.x>1.) discard;\n	if(cliped.y<0.) discard;\n	if(cliped.y>1.) discard;\n	\n#ifdef FILLTEXTURE	\n   vec4 color= texture2D(texture, fract(v_texcoordAlpha.xy)*u_TexRange.zw + u_TexRange.xy);\n#else\n   vec4 color= texture2D(texture, v_texcoordAlpha.xy);\n#endif\n\n   if(v_useTex<=0.)color = vec4(1.,1.,1.,1.);\n   color.a*=v_color.w;\n   //color.rgb*=v_color.w;\n   color.rgb*=v_color.rgb;\n   gl_FragColor=color;\n   \n   #ifdef COLOR_ADD\n	gl_FragColor = vec4(colorAdd.rgb,colorAdd.a*gl_FragColor.a);\n	gl_FragColor.xyz *= colorAdd.a;\n   #endif\n   \n   #ifdef BLUR_FILTER\n	gl_FragColor =   blur();\n	gl_FragColor.w*=v_color.w;   \n   #endif\n   \n   #ifdef COLOR_FILTER\n	mat4 alphaMat =colorMat;\n\n	alphaMat[0][3] *= gl_FragColor.a;\n	alphaMat[1][3] *= gl_FragColor.a;\n	alphaMat[2][3] *= gl_FragColor.a;\n\n	gl_FragColor = gl_FragColor * alphaMat;\n	gl_FragColor += colorAlpha/255.0*gl_FragColor.a;\n   #endif\n   \n   #ifdef GLOW_FILTER\n	const float c_IterationTime = 10.0;\n	float floatIterationTotalTime = c_IterationTime * c_IterationTime;\n	vec4 vec4Color = vec4(0.0,0.0,0.0,0.0);\n	vec2 vec2FilterDir = vec2(-(u_blurInfo1.z)/u_blurInfo2.x,-(u_blurInfo1.w)/u_blurInfo2.y);\n	vec2 vec2FilterOff = vec2(u_blurInfo1.x/u_blurInfo2.x/c_IterationTime * 2.0,u_blurInfo1.y/u_blurInfo2.y/c_IterationTime * 2.0);\n	float maxNum = u_blurInfo1.x * u_blurInfo1.y;\n	vec2 vec2Off = vec2(0.0,0.0);\n	float floatOff = c_IterationTime/2.0;\n	for(float i = 0.0;i<=c_IterationTime; ++i){\n		for(float j = 0.0;j<=c_IterationTime; ++j){\n			vec2Off = vec2(vec2FilterOff.x * (i - floatOff),vec2FilterOff.y * (j - floatOff));\n			vec4Color += texture2D(texture, v_texcoordAlpha.xy + vec2FilterDir + vec2Off)/floatIterationTotalTime;\n		}\n	}\n	gl_FragColor = vec4(u_color.rgb,vec4Color.a * u_blurInfo2.z);\n	gl_FragColor.rgb *= gl_FragColor.a;   \n   #endif\n   \n}";
 		Shader.preCompile2D(0,/*laya.webgl.shader.d2.ShaderDefines2D.TEXTURE2D*/0x01,vs,ps,null);
 		vs="attribute vec4 position;\nattribute vec4 attribColor;\n//attribute vec4 clipDir;\n//attribute vec2 clipRect;\nuniform vec4 clipMatDir;\nuniform vec2 clipMatPos;\n#ifdef WORLDMAT\n	uniform mat4 mmat;\n#endif\nuniform mat4 u_mmat2;\n//uniform vec2 u_pos;\nuniform vec2 size;\nvarying vec4 color;\n//vec4 dirxy=vec4(0.9,0.1, -0.1,0.9);\n//vec4 clip=vec4(100.,30.,300.,600.);\nvarying vec2 cliped;\nvoid main(){\n	\n#ifdef WORLDMAT\n	vec4 pos=mmat*vec4(position.xy,0.,1.);\n	gl_Position =vec4((pos.x/size.x-0.5)*2.0,(0.5-pos.y/size.y)*2.0,pos.z,1.0);\n#else\n	gl_Position =vec4((position.x/size.x-0.5)*2.0,(0.5-position.y/size.y)*2.0,position.z,1.0);\n#endif	\n	float clipw = length(clipMatDir.xy);\n	float cliph = length(clipMatDir.zw);\n	vec2 clippos = position.xy - clipMatPos.xy;	//pos已经应用矩阵了，为了减的有意义，clip的位置也要缩放\n	if(clipw>20000. && cliph>20000.)\n		cliped = vec2(0.5,0.5);\n	else {\n		//clipdir是带缩放的方向，由于上面clippos是在缩放后的空间计算的，所以需要把方向先normalize一下\n		cliped=vec2( dot(clippos,clipMatDir.xy)/clipw/clipw, dot(clippos,clipMatDir.zw)/cliph/cliph);\n	}\n  //pos2d.x = dot(clippos,dirx);\n  color=attribColor/255.;\n}";
 		ps="precision mediump float;\n//precision mediump float;\nvarying vec4 color;\n//uniform float alpha;\nvarying vec2 cliped;\nvoid main(){\n	//vec4 a=vec4(color.r, color.g, color.b, 1);\n	//a.a*=alpha;\n    gl_FragColor= color;// vec4(color.r, color.g, color.b, alpha);\n	gl_FragColor.rgb*=color.a;\n	if(cliped.x<0.) discard;\n	if(cliped.x>1.) discard;\n	if(cliped.y<0.) discard;\n	if(cliped.y>1.) discard;\n}";
 		Shader.preCompile2D(0,/*laya.webgl.shader.d2.ShaderDefines2D.PRIMITIVE*/0x04,vs,ps,null);
-		vs="/*\n	texture和fillrect使用的。\n*/\nattribute vec4 posuv;\nattribute vec4 attribColor;\nattribute vec4 attribFlags;\n//attribute vec4 clipDir;\n//attribute vec2 clipRect;\nuniform vec4 clipMatDir;\nuniform vec2 clipMatPos;\nvarying vec2 cliped;\nuniform vec2 size;\n\n#ifdef WORLDMAT\n	uniform mat4 mmat;\n#endif\n\nvarying vec4 v_texcoordAlpha;\nvarying vec4 v_color;\nvarying float v_useTex;\n\nvoid main() {\n\n#ifdef WORLDMAT\n	vec4 pos=mmat*vec4(posuv.xy,0.,1.);\n	gl_Position =vec4((pos.x/size.x-0.5)*2.0,(0.5-pos.y/size.y)*2.0,0.,1.0);\n#else\n	gl_Position =vec4((posuv.x/size.x-0.5)*2.0,(0.5-posuv.y/size.y)*2.0,0.,1.0);\n#endif\n  \n	v_texcoordAlpha.xy = posuv.zw;\n	//v_texcoordAlpha.z = attribColor.a/255.0;\n	v_color = attribColor/255.0;\n	v_color.xyz*=v_color.w;//反正后面也要预乘\n	\n	v_useTex = attribFlags.r/255.0;\n	float clipw = length(clipMatDir.xy);\n	float cliph = length(clipMatDir.zw);\n	vec2 clippos = posuv.xy - clipMatPos.xy;	//pos已经应用矩阵了，为了减的有意义，clip的位置也要缩放\n	if(clipw>20000. && cliph>20000.)\n		cliped = vec2(0.5,0.5);\n	else {\n		//转成0到1之间。/clipw/clipw 表示clippos与normalize之后的clip朝向点积之后，再除以clipw\n		cliped=vec2( dot(clippos,clipMatDir.xy)/clipw/clipw, dot(clippos,clipMatDir.zw)/cliph/cliph);\n	}\n\n}";
+		vs="/*\n	texture和fillrect使用的。\n*/\nattribute vec4 posuv;\nattribute vec4 attribColor;\nattribute vec4 attribFlags;\n//attribute vec4 clipDir;\n//attribute vec2 clipRect;\nuniform vec4 clipMatDir;\nuniform vec2 clipMatPos;		// 这个是全局的，不用再应用矩阵了。\nvarying vec2 cliped;\nuniform vec2 size;\n\n#ifdef WORLDMAT\n	uniform mat4 mmat;\n#endif\nuniform mat4 u_MvpMatrix;\n\nvarying vec4 v_texcoordAlpha;\nvarying vec4 v_color;\nvarying float v_useTex;\n\nvoid main() {\n\n	vec4 pos = vec4(posuv.xy,0.,1.);\n#ifdef WORLDMAT\n	pos=mmat*pos;\n#endif\n	vec4 pos1  =vec4((pos.x/size.x-0.5)*2.0,(0.5-pos.y/size.y)*2.0,0.,1.0);\n#ifdef MVP3D\n	gl_Position=u_MvpMatrix*pos1;\n#else\n	gl_Position=pos1;\n#endif\n	v_texcoordAlpha.xy = posuv.zw;\n	//v_texcoordAlpha.z = attribColor.a/255.0;\n	v_color = attribColor/255.0;\n	v_color.xyz*=v_color.w;//反正后面也要预乘\n	\n	v_useTex = attribFlags.r/255.0;\n	float clipw = length(clipMatDir.xy);\n	float cliph = length(clipMatDir.zw);\n	vec2 clippos = pos.xy - clipMatPos.xy;	//pos已经应用矩阵了，为了减的有意义，clip的位置也要缩放\n	if(clipw>20000. && cliph>20000.)\n		cliped = vec2(0.5,0.5);\n	else {\n		//转成0到1之间。/clipw/clipw 表示clippos与normalize之后的clip朝向点积之后，再除以clipw\n		cliped=vec2( dot(clippos,clipMatDir.xy)/clipw/clipw, dot(clippos,clipMatDir.zw)/cliph/cliph);\n	}\n\n}";
 		ps="#ifdef FSHIGHPRECISION\n	precision highp float;\n#else\n	precision mediump float;\n#endif\n\n//precision highp float;\nvarying vec2 v_texcoord;\nuniform sampler2D texture;\nuniform float alpha;\nuniform vec4 u_TexRange;\nuniform vec2 u_offset;\n\n#import?BLUR_FILTER  \"parts/BlurFilter_ps_uniform.glsl\";\n\n#import?COLOR_FILTER \"parts/ColorFilter.glsl\" with ColorFilter_ps_uniform;\n\n#import?GLOW_FILTER \"parts/GlowFilter_ps_uniform.glsl\";\n\n#import?COLOR_ADD \"parts/ColorAdd.glsl\" with ColorAdd_ps_uniform;\n\nvoid main() {\n   vec2 newTexCoord;\n   newTexCoord.x = mod(u_offset.x + v_texcoord.x,u_TexRange.y) + u_TexRange.x;\n   newTexCoord.y = mod(u_offset.y + v_texcoord.y,u_TexRange.w) + u_TexRange.z;\n   vec4 color= texture2D(texture, newTexCoord);\n   color.a*=alpha;\n   gl_FragColor=color;\n   \n   #import?COLOR_ADD \"parts/ColorAdd.glsl\" with ColorAdd_ps_logic;\n   \n   #import?BLUR_FILTER  \"parts/BlurFilter_ps_logic.glsl\";\n   \n   #import?COLOR_FILTER \"parts/ColorFilter.glsl\" with ColorFilter_ps_logic;\n   \n   #import?GLOW_FILTER \"parts/GlowFilter_ps_logic.glsl\";\n}";
 		Shader.preCompile2D(0,/*laya.webgl.shader.d2.ShaderDefines2D.FILLTEXTURE*/0x100,vs,ps,null);
 		vs="attribute vec2 position;\nattribute vec2 texcoord;\nattribute vec4 color;\nuniform vec2 size;\nuniform float offsetX;\nuniform float offsetY;\nuniform mat4 mmat;\nuniform mat4 u_mmat2;\nvarying vec2 v_texcoord;\nvarying vec4 v_color;\nvoid main() {\n  vec4 pos=mmat*u_mmat2*vec4(offsetX+position.x,offsetY+position.y,0,1 );\n  gl_Position = vec4((pos.x/size.x-0.5)*2.0,(0.5-pos.y/size.y)*2.0,pos.z,1.0);\n  v_color = color;\n  v_color.rgb *= v_color.a;\n  v_texcoord = texcoord;  \n}";
@@ -7410,6 +8383,68 @@ var CommandEncoder=(function(){
 	}
 
 	return CommandEncoder;
+})()
+
+
+//class laya.webgl.utils.InlcudeFile
+var InlcudeFile=(function(){
+	function InlcudeFile(txt){
+		this.script=null;
+		this.codes={};
+		this.funs={};
+		this.curUseID=-1;
+		this.funnames="";
+		this.script=txt;
+		var begin=0,ofs=0,end=0;
+		while (true){
+			begin=txt.indexOf("#begin",begin);
+			if (begin < 0)break ;
+			end=begin+5;
+			while (true){
+				end=txt.indexOf("#end",end);
+				if (end < 0)break ;
+				if (txt.charAt(end+4)==='i')
+					end+=5;
+				else break ;
+			}
+			if (end < 0){
+				throw "add include err,no #end:"+txt;
+			}
+			ofs=txt.indexOf('\n',begin);
+			var words=ShaderCompile.splitToWords(txt.substr(begin,ofs-begin),null);
+			if (words[1]=='code'){
+				this.codes[words[2]]=txt.substr(ofs+1,end-ofs-1);
+				}else if (words[1]=='function'){
+				ofs=txt.indexOf("function",begin);
+				ofs+="function".length;
+				this.funs[words[3]]=txt.substr(ofs+1,end-ofs-1);
+				this.funnames+=words[3]+";";
+			}
+			begin=end+1;
+		}
+	}
+
+	__class(InlcudeFile,'laya.webgl.utils.InlcudeFile');
+	var __proto=InlcudeFile.prototype;
+	__proto.getWith=function(name){
+		var r=name ? this.codes[name] :this.script;
+		if (!r){
+			throw "get with error:"+name;
+		}
+		return r;
+	}
+
+	__proto.getFunsScript=function(funsdef){
+		var r="";
+		for (var i in this.funs){
+			if (funsdef.indexOf(i+";")>=0){
+				r+=this.funs[i];
+			}
+		}
+		return r;
+	}
+
+	return InlcudeFile;
 })()
 
 
@@ -7753,9 +8788,142 @@ var FillBorderWordsCmdNative=(function(){
 
 	FillBorderWordsCmdNative.ID="FillBorderWords";
 	__static(FillBorderWordsCmdNative,
-	['cbook',function(){return this.cbook=CharBook.charbookInst;}
+	['cbook',function(){return this.cbook=Laya['textRender'];}
 	]);
 	return FillBorderWordsCmdNative;
+})()
+
+
+/**
+*对象 cacheas normal的时候，本质上只是想把submit缓存起来，以后直接执行
+*为了避免各种各样的麻烦，这里采用复制响应部分的submit的方法。执行环境还是在原来的context中
+*否则包括clipt等都非常难以处理
+*/
+//class laya.webgl.canvas.WebGLCacheAsNormalCanvas
+var WebGLCacheAsNormalCanvas=(function(){
+	function WebGLCacheAsNormalCanvas(ctx,sp){
+		this.submitStartPos=0;
+		// 对应的context的submit的开始的地方
+		this.submitEndPos=0;
+		this.context=null;
+		this.touches=[];
+		//记录的文字信息。cacheas normal的话，文字要能正确touch
+		this.submits=[];
+		// 从context中剪切的submit
+		this.sprite=null;
+		// submit需要关联稳定独立的mesh。所以这里要创建自己的mesh对象
+		this._mesh=null;
+		//用Mesh2D代替_vb,_ib. 当前使用的mesh
+		this._pathMesh=null;
+		//矢量专用mesh。
+		this._triangleMesh=null;
+		//drawTriangles专用mesh。由于ib不固定，所以不能与_mesh通用
+		this.meshlist=[];
+		// 原始context的原始值
+		this._oldMesh=null;
+		this._oldPathMesh=null;
+		this._oldTriMesh=null;
+		this._oldMeshList=null;
+		//private var oldMatrix:Matrix=null;//本地画的时候完全不应用矩阵，所以需要先保存老的，以便恢复 这样会丢失缩放信息，导致文字模糊，所以不用这种方式了
+		this.oldTx=0;
+		this.oldTy=0;
+		this.cachedClipInfo=new Matrix();
+		this.invMat=new Matrix();
+		this.context=ctx;
+		this.sprite=sp;
+		ctx._globalClipMatrix.copyTo(this.cachedClipInfo);
+	}
+
+	__class(WebGLCacheAsNormalCanvas,'laya.webgl.canvas.WebGLCacheAsNormalCanvas');
+	var __proto=WebGLCacheAsNormalCanvas.prototype;
+	__proto.startRec=function(){
+		if (this.context._charSubmitCache._enbale){
+			this.context._charSubmitCache.enable(false,this.context);
+			this.context._charSubmitCache.enable(true,this.context);
+		}
+		this.touches.length=0;
+		(this.context).touches=this.touches;
+		this.context._globalClipMatrix.copyTo(this.cachedClipInfo);
+		this.submits.length=0;
+		this.submitStartPos=this.context._submits._length;
+		for (var i=0,sz=this.meshlist.length;i < sz;i++){
+			var curm=this.meshlist[i];
+			curm.canReuse?(curm.releaseMesh()):(curm.destroy());
+		}
+		this.meshlist.length=0;
+		this._mesh=MeshQuadTexture.getAMesh();
+		this._pathMesh=MeshVG.getAMesh();
+		this._triangleMesh=MeshTexture.getAMesh();
+		this.meshlist.push(this._mesh);
+		this.meshlist.push(this._pathMesh);
+		this.meshlist.push(this._triangleMesh);
+		this.context._curSubmit=Submit.RENDERBASE;
+		this._oldMesh=this.context._mesh;
+		this._oldPathMesh=this.context._pathMesh;
+		this._oldTriMesh=this.context._triangleMesh;
+		this._oldMeshList=this.context.meshlist;
+		this.context._mesh=this._mesh;
+		this.context._pathMesh=this._pathMesh;
+		this.context._triangleMesh=this._triangleMesh;
+		this.context.meshlist=this.meshlist;
+		this.oldTx=this.context._curMat.tx;
+		this.oldTy=this.context._curMat.ty;
+		this.context._curMat.tx=0;
+		this.context._curMat.ty=0;
+		this.context._curMat.copyTo(this.invMat);
+		this.invMat.invert();
+	}
+
+	//context._curMat=matI;
+	__proto.endRec=function(){
+		if (this.context._charSubmitCache._enbale){
+			this.context._charSubmitCache.enable(false,this.context);
+			this.context._charSubmitCache.enable(true,this.context);
+		};
+		var parsubmits=(this.context)._submits;
+		this.submitEndPos=parsubmits._length;
+		var num=this.submitEndPos-this.submitStartPos;
+		for (var i=0;i < num;i++){
+			this.submits.push(parsubmits[this.submitStartPos+i]);
+		}
+		parsubmits._length-=num;
+		this.context._mesh=this._oldMesh;
+		this.context._pathMesh=this._oldPathMesh;
+		this.context._triangleMesh=this._oldTriMesh;
+		this.context.meshlist=this._oldMeshList;
+		this.context._curSubmit=Submit.RENDERBASE;
+		this.context._curMat.tx=this.oldTx;
+		this.context._curMat.ty=this.oldTy;
+		(this.context).touches=null;
+	}
+
+	/**
+	*当前缓存是否还有效。例如clip变了就失效了，因为clip太难自动处理
+	*@return
+	*/
+	__proto.isCacheValid=function(){
+		var curclip=this.context._globalClipMatrix;
+		if (curclip.a !=this.cachedClipInfo.a || curclip.b !=this.cachedClipInfo.b || curclip.c !=this.cachedClipInfo.c
+			|| curclip.d !=this.cachedClipInfo.d || curclip.tx !=this.cachedClipInfo.tx || curclip.ty !=this.cachedClipInfo.ty)
+		return false;
+		return true;
+	}
+
+	__proto.flushsubmit=function(){
+		var curSubmit=Submit.RENDERBASE;
+		this.submits.forEach(function(subm){
+			if (subm==Submit.RENDERBASE)return;
+			Submit.preRender=curSubmit;
+			curSubmit=subm;
+			subm.renderSubmit();
+		});
+	}
+
+	__proto.releaseMem=function(){}
+	__static(WebGLCacheAsNormalCanvas,
+	['matI',function(){return this.matI=new Matrix();}
+	]);
+	return WebGLCacheAsNormalCanvas;
 })()
 
 
@@ -7791,7 +8959,7 @@ var EarcutNode=(function(){
 var BasePoly=(function(){
 	function BasePoly(){}
 	__class(BasePoly,'laya.webgl.shapes.BasePoly');
-	BasePoly.createLine2=function(p,indices,lineWidth,indexBase,outVertex,loop,mat){
+	BasePoly.createLine2=function(p,indices,lineWidth,indexBase,outVertex,loop){
 		if (p.length < 4)return null;
 		var points=BasePoly.tempData.length>(p.length+2)?BasePoly.tempData:new Array(p.length+2);
 		points[0]=p[0];points[1]=p[1];
@@ -7823,10 +8991,6 @@ var BasePoly=(function(){
 		perpx=perpx / dist *w;
 		perpy=perpy / dist *w;
 		var tpx=perpx,tpy=perpy;
-		if(mat){
-			perpx=mat.a *tpx+mat.c *tpy;
-			perpy=mat.b *tpx+mat.d *tpy;
-		}
 		result.push(p1x-perpx ,p1y-perpy ,p1x+perpx ,p1y+perpy);
 		for (i=1;i < length-1;i++){
 			p1x=points[(i-1)*2];
@@ -7840,21 +9004,11 @@ var BasePoly=(function(){
 			dist=Math.sqrt(perpx *perpx+perpy *perpy);
 			perpx=perpx / dist *w;
 			perpy=perpy / dist *w;
-			if(mat){
-				tpx=perpx,tpy=perpy;
-				perpx=mat.a *tpx+mat.c *tpy;
-				perpy=mat.b *tpx+mat.d *tpy;
-			}
 			perp2x=-(p2y-p3y);
 			perp2y=p2x-p3x;
 			dist=Math.sqrt(perp2x *perp2x+perp2y *perp2y);
 			perp2x=perp2x / dist *w;
 			perp2y=perp2y / dist *w;
-			if(mat){
-				tpx=perp2x,tpy=perp2y;
-				perp2x=mat.a *tpx+mat.c *tpy;
-				perp2y=mat.b *tpx+mat.d *tpy;
-			}
 			a1=(-perpy+p1y)-(-perpy+p2y);
 			b1=(-perpx+p2x)-(-perpx+p1x);
 			c1=(-perpx+p1x)*(-perpy+p2y)-(-perpx+p2x)*(-perpy+p1y);
@@ -7881,11 +9035,6 @@ var BasePoly=(function(){
 		dist=Math.sqrt(perpx *perpx+perpy *perpy);
 		perpx=perpx / dist *w;
 		perpy=perpy / dist *w;
-		if(mat){
-			tpx=perpx,tpy=perpy;
-			perpx=mat.a *tpx+mat.c *tpy;
-			perpy=mat.b *tpx+mat.d *tpy;
-		}
 		result.push(p2x-perpx ,p2y-perpy ,p2x+perpx ,p2y+perpy);
 		for (i=1;i < length;i++){
 			indices.push(indexBase+(i-1)*2,indexBase+(i-1)*2+1,indexBase+i *2+1,indexBase+i *2+1,indexBase+i *2,indexBase+(i-1)*2);
@@ -7960,6 +9109,102 @@ var BasePoly=(function(){
 	['tempData',function(){return this.tempData=new Array(256);}
 	]);
 	return BasePoly;
+})()
+
+
+/**
+*...
+*@author laoxie
+*/
+//class laya.webgl.text.CharSubmitCache
+var CharSubmitCache=(function(){
+	function CharSubmitCache(){
+		this._data=[];
+		this._ndata=0;
+		this._tex=null;
+		this._imgId=0;
+		this._clipid=-1;
+		this._enbale=false;
+		this._colorFiler=null;
+		this._clipMatrix=new Matrix();
+	}
+
+	__class(CharSubmitCache,'laya.webgl.text.CharSubmitCache');
+	var __proto=CharSubmitCache.prototype;
+	__proto.clear=function(){
+		this._tex=null;
+		this._imgId=-1;
+		this._ndata=0;
+		this._enbale=false;
+		this._colorFiler=null;
+	}
+
+	__proto.destroy=function(){
+		this.clear();
+		this._data.length=0;
+		this._data=null;
+	}
+
+	__proto.add=function(ctx,tex,imgid,pos,uv,color){
+		if (this._ndata > 0 && (this._tex !=tex || this._imgId !=imgid ||
+			(this._clipid>=0 && this._clipid!=ctx._clipInfoID))){
+			this.submit(ctx);
+		}
+		this._clipid=ctx._clipInfoID;
+		ctx._globalClipMatrix.copyTo(this._clipMatrix);
+		this._tex=tex;
+		this._imgId=imgid;
+		this._colorFiler=ctx._colorFiler;
+		this._data[this._ndata]=pos;
+		this._data[this._ndata+1]=uv;
+		this._data[this._ndata+2]=color;
+		this._ndata+=3;
+	}
+
+	__proto.getPos=function(){
+		if (CharSubmitCache.__nPosPool==0)
+			return new Array(8);
+		return CharSubmitCache.__posPool[--CharSubmitCache.__nPosPool];
+	}
+
+	__proto.enable=function(value,ctx){
+		if (value===this._enbale)
+			return;
+		this._enbale=value;
+		this._enbale || this.submit(ctx);
+	}
+
+	__proto.submit=function(ctx){
+		var n=this._ndata;
+		if (!n)
+			return;
+		var _mesh=ctx._mesh;
+		var colorFiler=ctx._colorFiler;
+		ctx._colorFiler=this._colorFiler;
+		var submit=SubmitTexture.create(ctx,_mesh ,Value2D.create(/*laya.webgl.shader.d2.ShaderDefines2D.TEXTURE2D*/0x01,0));
+		ctx._submits[ctx._submits._length++]=ctx._curSubmit=submit;
+		submit.shaderValue.textureHost=this._tex;
+		submit._key.other=this._imgId;
+		ctx._colorFiler=colorFiler;
+		ctx._copyClipInfo(submit,this._clipMatrix);
+		submit.clipInfoID=this._clipid;
+		for (var i=0;i < n;i+=3){
+			_mesh.addQuad(this._data[i],this._data[i+1] ,this._data [i+2],true);
+			CharSubmitCache.__posPool[CharSubmitCache.__nPosPool++]=this._data[i];
+		}
+		n /=3;
+		submit._numEle+=n*6;
+		_mesh.indexNum+=n*6;
+		_mesh.vertNum+=n*4;
+		ctx._drawCount+=n;
+		this._ndata=0;
+		if (Stat.loopCount % 100==0)
+			this._data.length=0;
+	}
+
+	CharSubmitCache.__posPool=[];
+	CharSubmitCache.__nPosPool=0;
+	return CharSubmitCache;
 })()
 
 
@@ -8557,6 +9802,7 @@ var RenderState2D=(function(){
 	RenderState2D.EMPTYMAT4_ARRAY=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
 	RenderState2D.TEMPMAT4_ARRAY=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
 	RenderState2D.worldMatrix4=RenderState2D.TEMPMAT4_ARRAY;
+	RenderState2D.matWVP=null;
 	RenderState2D.worldAlpha=1.0;
 	RenderState2D.worldScissorTest=false;
 	RenderState2D.worldShaderDefines=null;
@@ -8719,7 +9965,6 @@ var SubmitKey=(function(){
 
 	//alpha=src.alpha;
 	__proto.copyFrom2=function(src,submitType,other){
-		this.blendShader=src.blendShader;
 		this.other=other;
 		this.submitType=submitType;
 	}
@@ -8902,9 +10147,48 @@ var FillBorderTextCmdNative=(function(){
 
 	FillBorderTextCmdNative.ID="FillBorderText";
 	__static(FillBorderTextCmdNative,
-	['cbook',function(){return this.cbook=CharBook.charbookInst;}
+	['cbook',function(){return this.cbook=Laya['textRender'];}
 	]);
 	return FillBorderTextCmdNative;
+})()
+
+
+//class laya.layagl.ConchPropertyAdpt
+var ConchPropertyAdpt=(function(){
+	function ConchPropertyAdpt(){}
+	__class(ConchPropertyAdpt,'laya.layagl.ConchPropertyAdpt');
+	ConchPropertyAdpt.rewriteProperties=function(){
+		laya.layagl.ConchPropertyAdpt.rewriteNumProperty(Rectangle.prototype,"x");
+		laya.layagl.ConchPropertyAdpt.rewriteNumProperty(Rectangle.prototype,"y");
+		laya.layagl.ConchPropertyAdpt.rewriteNumProperty(Rectangle.prototype,"width");
+		laya.layagl.ConchPropertyAdpt.rewriteNumProperty(Rectangle.prototype,"height");
+		laya.layagl.ConchPropertyAdpt.rewriteFunc(Rectangle.prototype,"recover");
+	}
+
+	ConchPropertyAdpt.rewriteNumProperty=function(proto,p){
+		Object["defineProperty"](proto,p,{
+			"get":function (){
+				return this["_"+p] || 0;
+			},
+			"set":function (v){
+				this["_"+p]=v;
+				if (this.onPropertyChanged){
+					this.onPropertyChanged(this);
+				}
+			}
+		});
+	}
+
+	ConchPropertyAdpt.rewriteFunc=function(proto,p){
+		proto["__"+p]=proto[p];
+		proto[p]=function (){
+			proto["__"+p].call(this);
+			if (this.onPropertyChanged)
+				this.onPropertyChanged=null;
+		}
+	}
+
+	return ConchPropertyAdpt;
 })()
 
 
@@ -9464,7 +10748,7 @@ var LayaNative2D=(function(){
 			LayaNative2D.GLOBALVALUE_GLOWFILTER_BLURINFO1=layaGL.addGlobalValueDefine(0,/*laya.webgl.WebGLContext.FLOAT*/0x1406,4,new Float32Array([0,0,0,0]));
 			LayaNative2D.GLOBALVALUE_GLOWFILTER_BLURINFO2=layaGL.addGlobalValueDefine(0,/*laya.webgl.WebGLContext.FLOAT*/0x1406,4,new Float32Array([0,0,0,0]));
 			layaGL.endGlobalValueDefine();
-			LayaNative2D.PROGRAMEX_DRAWTEXTURE=LayaGL.instance.createProgramEx("/*\n	texture和fillrect使用的。\n*/\nattribute vec4 posuv;\nattribute vec4 attribColor;\nattribute vec4 attribFlags;\n//attribute vec4 clipDir;\n//attribute vec2 clipRect;\nuniform vec4 clipMatDir;\nuniform vec2 clipMatPos;\nvarying vec2 cliped;\nuniform vec2 size;\n\n#ifdef WORLDMAT\n	uniform mat4 mmat;\n#endif\n\nvarying vec4 v_texcoordAlpha;\nvarying vec4 v_color;\nvarying float v_useTex;\n\nvoid main() {\n\n#ifdef WORLDMAT\n	vec4 pos=mmat*vec4(posuv.xy,0.,1.);\n	gl_Position =vec4((pos.x/size.x-0.5)*2.0,(0.5-pos.y/size.y)*2.0,0.,1.0);\n#else\n	gl_Position =vec4((posuv.x/size.x-0.5)*2.0,(0.5-posuv.y/size.y)*2.0,0.,1.0);\n#endif\n  \n	v_texcoordAlpha.xy = posuv.zw;\n	//v_texcoordAlpha.z = attribColor.a/255.0;\n	v_color = attribColor/255.0;\n	v_color.xyz*=v_color.w;//反正后面也要预乘\n	\n	v_useTex = attribFlags.r/255.0;\n	float clipw = length(clipMatDir.xy);\n	float cliph = length(clipMatDir.zw);\n	vec2 clippos = posuv.xy - clipMatPos.xy;	//pos已经应用矩阵了，为了减的有意义，clip的位置也要缩放\n	if(clipw>20000. && cliph>20000.)\n		cliped = vec2(0.5,0.5);\n	else {\n		//转成0到1之间。/clipw/clipw 表示clippos与normalize之后的clip朝向点积之后，再除以clipw\n		cliped=vec2( dot(clippos,clipMatDir.xy)/clipw/clipw, dot(clippos,clipMatDir.zw)/cliph/cliph);\n	}\n\n}","/*\n	texture和fillrect使用的。\n*/\n\nprecision mediump float;\n//precision highp float;\nvarying vec4 v_texcoordAlpha;\nvarying vec4 v_color;\nvarying float v_useTex;\nuniform sampler2D texture;\nvarying vec2 cliped;\n\n#ifdef BLUR_FILTER\nuniform vec4 strength_sig2_2sig2_gauss1;\nuniform vec2 blurInfo;\n\n#define PI 3.141593\n\nfloat getGaussian(float x, float y){\n    return strength_sig2_2sig2_gauss1.w*exp(-(x*x+y*y)/strength_sig2_2sig2_gauss1.z);\n}\n\nvec4 blur(){\n    const float blurw = 9.0;\n    vec4 vec4Color = vec4(0.0,0.0,0.0,0.0);\n    vec2 halfsz=vec2(blurw,blurw)/2.0/blurInfo;    \n    vec2 startpos=v_texcoordAlpha.xy-halfsz;\n    vec2 ctexcoord = startpos;\n    vec2 step = 1.0/blurInfo;  //每个像素      \n    \n    for(float y = 0.0;y<=blurw; ++y){\n        ctexcoord.x=startpos.x;\n        for(float x = 0.0;x<=blurw; ++x){\n            //TODO 纹理坐标的固定偏移应该在vs中处理\n            vec4Color += texture2D(texture, ctexcoord)*getGaussian(x-blurw/2.0,y-blurw/2.0);\n            ctexcoord.x+=step.x;\n        }\n        ctexcoord.y+=step.y;\n    }\n    return vec4Color;\n}\n#endif\n\n#ifdef COLOR_FILTER\nuniform vec4 colorAlpha;\nuniform mat4 colorMat;\n#endif\n\n#ifdef GLOW_FILTER\nuniform vec4 u_color;\nuniform vec4 u_blurInfo1;\nuniform vec4 u_blurInfo2;\n#endif\n\n#ifdef COLOR_ADD\nuniform vec4 colorAdd;\n#endif\n\n//FILLTEXTURE\nuniform vec4 u_TexRange;//startu,startv,urange, vrange\n\nvoid main() {\n	if(cliped.x<0.) discard;\n	if(cliped.x>1.) discard;\n	if(cliped.y<0.) discard;\n	if(cliped.y>1.) discard;\n	\n#ifdef FILLTEXTURE	\n   vec4 color= texture2D(texture, fract(v_texcoordAlpha.xy)*u_TexRange.zw + u_TexRange.xy);\n#else\n   vec4 color= texture2D(texture, v_texcoordAlpha.xy);\n#endif\n\n   if(v_useTex<=0.)color = vec4(1.,1.,1.,1.);\n   color.a*=v_color.w;\n   //color.rgb*=v_color.w;\n   color.rgb*=v_color.rgb;\n   gl_FragColor=color;\n   \n   #ifdef COLOR_ADD\n	gl_FragColor = vec4(colorAdd.rgb,colorAdd.a*gl_FragColor.a);\n	gl_FragColor.xyz *= colorAdd.a;\n   #endif\n   \n   #ifdef BLUR_FILTER\n	gl_FragColor =   blur();\n	gl_FragColor.w*=v_color.w;   \n   #endif\n   \n   #ifdef COLOR_FILTER\n	mat4 alphaMat =colorMat;\n\n	alphaMat[0][3] *= gl_FragColor.a;\n	alphaMat[1][3] *= gl_FragColor.a;\n	alphaMat[2][3] *= gl_FragColor.a;\n\n	gl_FragColor = gl_FragColor * alphaMat;\n	gl_FragColor += colorAlpha/255.0*gl_FragColor.a;\n   #endif\n   \n   #ifdef GLOW_FILTER\n	const float c_IterationTime = 10.0;\n	float floatIterationTotalTime = c_IterationTime * c_IterationTime;\n	vec4 vec4Color = vec4(0.0,0.0,0.0,0.0);\n	vec2 vec2FilterDir = vec2(-(u_blurInfo1.z)/u_blurInfo2.x,-(u_blurInfo1.w)/u_blurInfo2.y);\n	vec2 vec2FilterOff = vec2(u_blurInfo1.x/u_blurInfo2.x/c_IterationTime * 2.0,u_blurInfo1.y/u_blurInfo2.y/c_IterationTime * 2.0);\n	float maxNum = u_blurInfo1.x * u_blurInfo1.y;\n	vec2 vec2Off = vec2(0.0,0.0);\n	float floatOff = c_IterationTime/2.0;\n	for(float i = 0.0;i<=c_IterationTime; ++i){\n		for(float j = 0.0;j<=c_IterationTime; ++j){\n			vec2Off = vec2(vec2FilterOff.x * (i - floatOff),vec2FilterOff.y * (j - floatOff));\n			vec4Color += texture2D(texture, v_texcoordAlpha.xy + vec2FilterDir + vec2Off)/floatIterationTotalTime;\n		}\n	}\n	gl_FragColor = vec4(u_color.rgb,vec4Color.a * u_blurInfo2.z);\n	gl_FragColor.rgb *= gl_FragColor.a;   \n   #endif\n   \n}","posuv,attribColor,attribFlags","size,clipMatDir,clipMatPos,texture,colorMat,colorAlpha,strength_sig2_2sig2_gauss1,blurInfo,u_color,u_blurInfo1,u_blurInfo2");
+			LayaNative2D.PROGRAMEX_DRAWTEXTURE=LayaGL.instance.createProgramEx("/*\n	texture和fillrect使用的。\n*/\nattribute vec4 posuv;\nattribute vec4 attribColor;\nattribute vec4 attribFlags;\n//attribute vec4 clipDir;\n//attribute vec2 clipRect;\nuniform vec4 clipMatDir;\nuniform vec2 clipMatPos;		// 这个是全局的，不用再应用矩阵了。\nvarying vec2 cliped;\nuniform vec2 size;\n\n#ifdef WORLDMAT\n	uniform mat4 mmat;\n#endif\nuniform mat4 u_MvpMatrix;\n\nvarying vec4 v_texcoordAlpha;\nvarying vec4 v_color;\nvarying float v_useTex;\n\nvoid main() {\n\n	vec4 pos = vec4(posuv.xy,0.,1.);\n#ifdef WORLDMAT\n	pos=mmat*pos;\n#endif\n	vec4 pos1  =vec4((pos.x/size.x-0.5)*2.0,(0.5-pos.y/size.y)*2.0,0.,1.0);\n#ifdef MVP3D\n	gl_Position=u_MvpMatrix*pos1;\n#else\n	gl_Position=pos1;\n#endif\n	v_texcoordAlpha.xy = posuv.zw;\n	//v_texcoordAlpha.z = attribColor.a/255.0;\n	v_color = attribColor/255.0;\n	v_color.xyz*=v_color.w;//反正后面也要预乘\n	\n	v_useTex = attribFlags.r/255.0;\n	float clipw = length(clipMatDir.xy);\n	float cliph = length(clipMatDir.zw);\n	vec2 clippos = pos.xy - clipMatPos.xy;	//pos已经应用矩阵了，为了减的有意义，clip的位置也要缩放\n	if(clipw>20000. && cliph>20000.)\n		cliped = vec2(0.5,0.5);\n	else {\n		//转成0到1之间。/clipw/clipw 表示clippos与normalize之后的clip朝向点积之后，再除以clipw\n		cliped=vec2( dot(clippos,clipMatDir.xy)/clipw/clipw, dot(clippos,clipMatDir.zw)/cliph/cliph);\n	}\n\n}","/*\n	texture和fillrect使用的。\n*/\n\nprecision mediump float;\n//precision highp float;\nvarying vec4 v_texcoordAlpha;\nvarying vec4 v_color;\nvarying float v_useTex;\nuniform sampler2D texture;\nvarying vec2 cliped;\n\n#ifdef BLUR_FILTER\nuniform vec4 strength_sig2_2sig2_gauss1;\nuniform vec2 blurInfo;\n\n#define PI 3.141593\n\nfloat getGaussian(float x, float y){\n    return strength_sig2_2sig2_gauss1.w*exp(-(x*x+y*y)/strength_sig2_2sig2_gauss1.z);\n}\n\nvec4 blur(){\n    const float blurw = 9.0;\n    vec4 vec4Color = vec4(0.0,0.0,0.0,0.0);\n    vec2 halfsz=vec2(blurw,blurw)/2.0/blurInfo;    \n    vec2 startpos=v_texcoordAlpha.xy-halfsz;\n    vec2 ctexcoord = startpos;\n    vec2 step = 1.0/blurInfo;  //每个像素      \n    \n    for(float y = 0.0;y<=blurw; ++y){\n        ctexcoord.x=startpos.x;\n        for(float x = 0.0;x<=blurw; ++x){\n            //TODO 纹理坐标的固定偏移应该在vs中处理\n            vec4Color += texture2D(texture, ctexcoord)*getGaussian(x-blurw/2.0,y-blurw/2.0);\n            ctexcoord.x+=step.x;\n        }\n        ctexcoord.y+=step.y;\n    }\n    return vec4Color;\n}\n#endif\n\n#ifdef COLOR_FILTER\nuniform vec4 colorAlpha;\nuniform mat4 colorMat;\n#endif\n\n#ifdef GLOW_FILTER\nuniform vec4 u_color;\nuniform vec4 u_blurInfo1;\nuniform vec4 u_blurInfo2;\n#endif\n\n#ifdef COLOR_ADD\nuniform vec4 colorAdd;\n#endif\n\n//FILLTEXTURE\nuniform vec4 u_TexRange;//startu,startv,urange, vrange\n\nvoid main() {\n	if(cliped.x<0.) discard;\n	if(cliped.x>1.) discard;\n	if(cliped.y<0.) discard;\n	if(cliped.y>1.) discard;\n	\n#ifdef FILLTEXTURE	\n   vec4 color= texture2D(texture, fract(v_texcoordAlpha.xy)*u_TexRange.zw + u_TexRange.xy);\n#else\n   vec4 color= texture2D(texture, v_texcoordAlpha.xy);\n#endif\n\n   if(v_useTex<=0.)color = vec4(1.,1.,1.,1.);\n   color.a*=v_color.w;\n   //color.rgb*=v_color.w;\n   color.rgb*=v_color.rgb;\n   gl_FragColor=color;\n   \n   #ifdef COLOR_ADD\n	gl_FragColor = vec4(colorAdd.rgb,colorAdd.a*gl_FragColor.a);\n	gl_FragColor.xyz *= colorAdd.a;\n   #endif\n   \n   #ifdef BLUR_FILTER\n	gl_FragColor =   blur();\n	gl_FragColor.w*=v_color.w;   \n   #endif\n   \n   #ifdef COLOR_FILTER\n	mat4 alphaMat =colorMat;\n\n	alphaMat[0][3] *= gl_FragColor.a;\n	alphaMat[1][3] *= gl_FragColor.a;\n	alphaMat[2][3] *= gl_FragColor.a;\n\n	gl_FragColor = gl_FragColor * alphaMat;\n	gl_FragColor += colorAlpha/255.0*gl_FragColor.a;\n   #endif\n   \n   #ifdef GLOW_FILTER\n	const float c_IterationTime = 10.0;\n	float floatIterationTotalTime = c_IterationTime * c_IterationTime;\n	vec4 vec4Color = vec4(0.0,0.0,0.0,0.0);\n	vec2 vec2FilterDir = vec2(-(u_blurInfo1.z)/u_blurInfo2.x,-(u_blurInfo1.w)/u_blurInfo2.y);\n	vec2 vec2FilterOff = vec2(u_blurInfo1.x/u_blurInfo2.x/c_IterationTime * 2.0,u_blurInfo1.y/u_blurInfo2.y/c_IterationTime * 2.0);\n	float maxNum = u_blurInfo1.x * u_blurInfo1.y;\n	vec2 vec2Off = vec2(0.0,0.0);\n	float floatOff = c_IterationTime/2.0;\n	for(float i = 0.0;i<=c_IterationTime; ++i){\n		for(float j = 0.0;j<=c_IterationTime; ++j){\n			vec2Off = vec2(vec2FilterOff.x * (i - floatOff),vec2FilterOff.y * (j - floatOff));\n			vec4Color += texture2D(texture, v_texcoordAlpha.xy + vec2FilterDir + vec2Off)/floatIterationTotalTime;\n		}\n	}\n	gl_FragColor = vec4(u_color.rgb,vec4Color.a * u_blurInfo2.z);\n	gl_FragColor.rgb *= gl_FragColor.a;   \n   #endif\n   \n}","posuv,attribColor,attribFlags","size,clipMatDir,clipMatPos,texture,colorMat,colorAlpha,strength_sig2_2sig2_gauss1,blurInfo,u_color,u_blurInfo1,u_blurInfo2");
 			LayaNative2D.PROGRAMEX_DRAWVG=LayaGL.instance.createProgramEx("attribute vec4 position;\nattribute vec4 attribColor;\n//attribute vec4 clipDir;\n//attribute vec2 clipRect;\nuniform vec4 clipMatDir;\nuniform vec2 clipMatPos;\n#ifdef WORLDMAT\n	uniform mat4 mmat;\n#endif\nuniform mat4 u_mmat2;\n//uniform vec2 u_pos;\nuniform vec2 size;\nvarying vec4 color;\n//vec4 dirxy=vec4(0.9,0.1, -0.1,0.9);\n//vec4 clip=vec4(100.,30.,300.,600.);\nvarying vec2 cliped;\nvoid main(){\n	\n#ifdef WORLDMAT\n	vec4 pos=mmat*vec4(position.xy,0.,1.);\n	gl_Position =vec4((pos.x/size.x-0.5)*2.0,(0.5-pos.y/size.y)*2.0,pos.z,1.0);\n#else\n	gl_Position =vec4((position.x/size.x-0.5)*2.0,(0.5-position.y/size.y)*2.0,position.z,1.0);\n#endif	\n	float clipw = length(clipMatDir.xy);\n	float cliph = length(clipMatDir.zw);\n	vec2 clippos = position.xy - clipMatPos.xy;	//pos已经应用矩阵了，为了减的有意义，clip的位置也要缩放\n	if(clipw>20000. && cliph>20000.)\n		cliped = vec2(0.5,0.5);\n	else {\n		//clipdir是带缩放的方向，由于上面clippos是在缩放后的空间计算的，所以需要把方向先normalize一下\n		cliped=vec2( dot(clippos,clipMatDir.xy)/clipw/clipw, dot(clippos,clipMatDir.zw)/cliph/cliph);\n	}\n  //pos2d.x = dot(clippos,dirx);\n  color=attribColor/255.;\n}","precision mediump float;\n//precision mediump float;\nvarying vec4 color;\n//uniform float alpha;\nvarying vec2 cliped;\nvoid main(){\n	//vec4 a=vec4(color.r, color.g, color.b, 1);\n	//a.a*=alpha;\n    gl_FragColor= color;// vec4(color.r, color.g, color.b, alpha);\n	gl_FragColor.rgb*=color.a;\n	if(cliped.x<0.) discard;\n	if(cliped.x>1.) discard;\n	if(cliped.y<0.) discard;\n	if(cliped.y>1.) discard;\n}","position,attribColor","size,clipMatDir,clipMatPos");
 			LayaNative2D.PROGRAMEX_DRAWPARTICLE=LayaGL.instance.createProgramEx("attribute vec4 a_CornerTextureCoordinate;\nattribute vec3 a_Position;\nattribute vec3 a_Velocity;\nattribute vec4 a_StartColor;\nattribute vec4 a_EndColor;\nattribute vec3 a_SizeRotation;\nattribute vec2 a_Radius;\nattribute vec4 a_Radian;\nattribute float a_AgeAddScale;\nattribute float a_Time;\n\nvarying vec4 v_Color;\nvarying vec2 v_TextureCoordinate;\n\nuniform float u_CurrentTime;\nuniform float u_Duration;\nuniform float u_EndVelocity;\nuniform vec3 u_Gravity;\n\nuniform vec2 size;\nuniform mat4 u_mmat;\n\nvec4 ComputeParticlePosition(in vec3 position, in vec3 velocity,in float age,in float normalizedAge)\n{\n\n   float startVelocity = length(velocity);//起始标量速度\n   float endVelocity = startVelocity * u_EndVelocity;//结束标量速度\n\n   float velocityIntegral = startVelocity * normalizedAge +(endVelocity - startVelocity) * normalizedAge *normalizedAge/2.0;//计算当前速度的标量（单位空间），vt=v0*t+(1/2)*a*(t^2)\n   \n   vec3 addPosition = normalize(velocity) * velocityIntegral * u_Duration;//计算受自身速度影响的位置，转换标量到矢量    \n   addPosition += u_Gravity * age * normalizedAge;//计算受重力影响的位置\n   \n   float radius=mix(a_Radius.x, a_Radius.y, normalizedAge); //计算粒子受半径和角度影响（无需计算角度和半径时，可用宏定义优化屏蔽此计算）\n   float radianHorizontal =mix(a_Radian.x,a_Radian.z,normalizedAge);\n   float radianVertical =mix(a_Radian.y,a_Radian.w,normalizedAge);\n   \n   float r =cos(radianVertical)* radius;\n   addPosition.y += sin(radianVertical) * radius;\n	\n   addPosition.x += cos(radianHorizontal) *r;\n   addPosition.z += sin(radianHorizontal) *r;\n  \n   addPosition.y=-addPosition.y;//2D粒子位置更新需要取负，2D粒子坐标系Y轴正向朝上\n   position+=addPosition;\n   return  vec4(position,1.0);\n}\n\nfloat ComputeParticleSize(in float startSize,in float endSize, in float normalizedAge)\n{    \n    float size = mix(startSize, endSize, normalizedAge);\n    return size;\n}\n\nmat2 ComputeParticleRotation(in float rot,in float age)\n{    \n    float rotation =rot * age;\n    //计算2x2旋转矩阵.\n    float c = cos(rotation);\n    float s = sin(rotation);\n    return mat2(c, -s, s, c);\n}\n\nvec4 ComputeParticleColor(in vec4 startColor,in vec4 endColor,in float normalizedAge)\n{\n	vec4 color=mix(startColor,endColor,normalizedAge);\n    //硬编码设置，使粒子淡入很快，淡出很慢,6.7的缩放因子把置归一在0到1之间，可以谷歌x*(1-x)*(1-x)*6.7的制图表\n    color.a *= normalizedAge * (1.0-normalizedAge) * (1.0-normalizedAge) * 6.7;\n   \n    return color;\n}\n\nvoid main()\n{\n   float age = u_CurrentTime - a_Time;\n   age *= 1.0 + a_AgeAddScale;\n   float normalizedAge = clamp(age / u_Duration,0.0,1.0);\n   gl_Position = ComputeParticlePosition(a_Position, a_Velocity, age, normalizedAge);//计算粒子位置\n   float pSize = ComputeParticleSize(a_SizeRotation.x,a_SizeRotation.y, normalizedAge);\n   mat2 rotation = ComputeParticleRotation(a_SizeRotation.z, age);\n	\n    mat4 mat=u_mmat;\n    gl_Position=vec4((mat*gl_Position).xy,0.0,1.0);\n    gl_Position.xy += (rotation*a_CornerTextureCoordinate.xy) * pSize*vec2(mat[0][0],mat[1][1]);\n    gl_Position=vec4((gl_Position.x/size.x-0.5)*2.0,(0.5-gl_Position.y/size.y)*2.0,0.0,1.0);\n   \n   v_Color = ComputeParticleColor(a_StartColor,a_EndColor, normalizedAge);\n   v_TextureCoordinate =a_CornerTextureCoordinate.zw;\n}\n\n","#ifdef FSHIGHPRECISION\nprecision highp float;\n#else\nprecision mediump float;\n#endif\n\nvarying vec4 v_Color;\nvarying vec2 v_TextureCoordinate;\nuniform sampler2D u_texture;\n\nvoid main()\n{	\n	gl_FragColor=texture2D(u_texture,v_TextureCoordinate)*v_Color;\n	gl_FragColor.xyz *= v_Color.w;\n}","a_CornerTextureCoordinate,a_Position,a_Velocity,a_StartColor,a_EndColor,a_SizeRotation,a_Radius,a_Radian,a_AgeAddScale,a_Time","u_CurrentTime,u_Duration,u_EndVelocity,u_Gravity,size,u_mmat,u_texture");
 			LayaNative2D.VDO_MESHQUADTEXTURE=layaGL.createVDO(new Int32Array([ /*laya.webgl.WebGLContext.FLOAT*/0x1406,0,4,24,/*laya.webgl.WebGLContext.UNSIGNED_BYTE*/0x1401,16,4,24,/*laya.webgl.WebGLContext.UNSIGNED_BYTE*/0x1401,20,4,24]));
@@ -9478,7 +10762,8 @@ var LayaNative2D=(function(){
 			LayaNative2D.SHADER_MACRO_GLOW_FILTER=LayaGL.instance.defineShaderMacro("#define GLOW_FILTER",[ {uname:8,id:LayaNative2D.GLOBALVALUE_GLOWFILTER_COLOR },{uname:9,id:LayaNative2D.GLOBALVALUE_GLOWFILTER_BLURINFO1 },{uname:10,id:LayaNative2D.GLOBALVALUE_GLOWFILTER_BLURINFO2 }]);
 			LayaGLTemplate.__init__();
 			LayaGLTemplate.__init_END_();
-			new CharBook();
+			if(TextRender.useOldCharBook)new CharBook();
+			else new TextRender();
 			CharPages.charRender=new CharRender_Native();
 		}
 	}
@@ -9653,9 +10938,10 @@ var CharBook=(function(){
 		if (miniadp && miniadp.systemInfo && miniadp.systemInfo.system){
 			bugIOS=miniadp.systemInfo.system.toLowerCase()==='ios 10.1.1';
 		}
-		if (Browser.onMiniGame && !Browser.onAndroid && !bugIOS)CharBook.isWan1Wan=true;
+		if (Browser.onMiniGame && !bugIOS)CharBook.isWan1Wan=true;
 		CharBook.charbookInst=this;
-		CharPages.charRender=Render.isConchApp ? (new CharRender_Native()):(new CharRender_Canvas());
+		Laya['textRender']=this;
+		CharPages.charRender=Render.isConchApp ? (new CharRender_Native()):(new CharRender_Canvas(CharBook.textureWidth,CharBook.textureWidth,CharBook.scaleFontWithCtx,!CharBook.isWan1Wan,CharBook.debug));
 	}
 
 	__class(CharBook,'laya.webgl.resource.CharBook');
@@ -9693,10 +10979,6 @@ var CharBook=(function(){
 		return ret;
 	}
 
-	__proto.isEmoji=function(emoji){
-		return CharBook._emojiReg.test(emoji);
-	}
-
 	/**
 	*从string中取出一个完整的char，例如emoji的话要多个
 	*会修改 _curStrPos
@@ -9714,23 +10996,18 @@ var CharBook=(function(){
 		var state=0;
 		for (;i < len;i++){
 			var c=str.charCodeAt(i);
-			if ((c & 0xd800)==0xd800){
+			if ((c >>> 11)==0x1b){
+				if (state==1)break ;
 				state=1;
-				continue ;
-			}
-			if (c===0xfe0e || c===0xfe0f){
-				state=1;
-				continue ;
-			}
-			if (c==0x200d){
-				state=1;
-				continue ;
-			}
-			if (state==1)
-				break ;
-			else {
 				i++;
-				break ;
+			}
+			else if (c===0xfe0e || c===0xfe0f){}
+			else if (c==0x200d){
+				state=2;
+				}else {
+				if (state==0)state=1;
+				else if (state==1)break ;
+				else if (state==2){}
 			}
 		}
 		this._curStrPos=i;
@@ -9745,7 +11022,7 @@ var CharBook=(function(){
 				if (!pri)continue ;
 				for (var j=0,pisz=pri.length;j < pisz;j++){
 					var riSaved=(pri [j]).ri;
-					if (riSaved.tex.__destroyed){
+					if (riSaved.deleted || riSaved.tex.__destroyed){
 						return true;
 					}
 				}
@@ -9797,7 +11074,7 @@ var CharBook=(function(){
 				strWidth=wt.width=this._curPage.getWidth(str);
 			}
 			}else {
-			strWidth=this._curPage.getWidth(str);
+			strWidth=str?this._curPage.getWidth(str):0;
 		}
 		switch (textAlign){
 			case Context.ENUM_TEXTALIGN_CENTER:
@@ -9811,7 +11088,7 @@ var CharBook=(function(){
 			}
 		if (wt && wt.lastGCCnt !=this._curPage.gcCnt){
 			wt.lastGCCnt=this._curPage.gcCnt;
-			if (isWT && (this.hasFreedText(sameTexData,wt.startID))){
+			if (this.hasFreedText(sameTexData,wt.startID)){
 				sameTexData=wt.pageChars=[];
 			}
 		};
@@ -9840,9 +11117,12 @@ var CharBook=(function(){
 			};
 			var bold=font._bold;
 			while (curstr){
-				var isEmo=this.isEmoji(curstr);
 				var ri;
 				ri=this._curPage.getChar(curstr,lineWidth,font._size,color,strokeColor,bold,false,scaleky);
+				if (!ri){
+					break ;
+				}
+				ri.char=curstr;
 				if (ri.isSpace){
 					}else {
 					var add=sameTexData[ri.tex.id];
@@ -9851,7 +11131,7 @@ var CharBook=(function(){
 						if (startTexID < 0 || startTexID > ri.tex.id)
 							startTexID=ri.tex.id;
 					}
-					add.push({ri:ri,isEmoji:isEmo,x:stx,y:sty,color:'#'+(color & 0xffffff).toString(16),nColor:color,w:ri.bmpWidth / this.fontScaleX,h:ri.bmpHeight / this.fontScaleY});
+					add.push({ri:ri,x:stx,y:sty,w:ri.bmpWidth / this.fontScaleX,h:ri.bmpHeight / this.fontScaleY});
 				}
 				if (isHtmlChar){
 					chc=htmlchars[this._curStrPos++];
@@ -9883,7 +11163,7 @@ var CharBook=(function(){
 		var nStrokeColor=strokeColor ? ColorUtils.create(strokeColor).numColor :0;
 		CharBook._curFont=fontStr;
 		var font=FontInfo.Parse(fontStr);
-		this._fast_filltext(ctx,null,data,x,y,font,nColor,nStrokeColor,lineWidth,0,0);
+		this._fast_filltext(ctx,null,data,x,y,font,color,strokeColor,lineWidth,0,0);
 	}
 
 	/**
@@ -9912,7 +11192,7 @@ var CharBook=(function(){
 				nTextAlign=Context.ENUM_TEXTALIGN_RIGHT;
 				break ;
 			}
-		this._fast_filltext(ctx,data,null,x,y,font,nColor,nStrokeColor,lineWidth,nTextAlign,underLine);
+		this._fast_filltext(ctx,data,null,x,y,font,color,strokeColor,lineWidth,nTextAlign,underLine);
 	}
 
 	//TODO:coverage
@@ -10004,16 +11284,15 @@ var CharBook=(function(){
 			}
 			bold=font._bold;
 			while (curstr){
-				var isEmo=this.isEmoji(curstr);
 				var ri;
-				ri=this._curPage.getChar(curstr,lineWidth,font._size,nColor,nStrokeColor,bold,false,scaleky);
+				ri=this._curPage.getChar(curstr,lineWidth,font._size,color,strokeColor,bold,false,scaleky);
 				if (ri.isSpace){
 					}else {
 					var add=sameTexData[ri.tex.id];
 					if (!add){
 						sameTexData[ri.tex.id]=add=[];
 					}
-					add.push({ri:ri,isEmoji:isEmo,x:stx,y:sty,color:color,nColor:nColor});
+					add.push({ri:ri,x:stx,y:sty,color:color,nColor:nColor});
 				}
 				if (isHtmlChar){
 					chc=htmlchars[this._curStrPos++];
@@ -10047,25 +11326,25 @@ var CharBook=(function(){
 		ctx.setFillColor(ctx.mixRGBandAlpha(0xffffff));
 		startx-=this._curPage.margin_left;
 		y-=this._curPage.margin_top;
+		var isLastRender=ctx._charSubmitCache._enbale;
 		for (var i=startID,sz=samePagesData.length;i < sz;i++){
 			var pri=samePagesData[i];
 			if (!pri)continue ;
 			var pisz=pri.length;
 			if (pisz <=0)continue ;
-			ctx._useNewTex2DSubmit(pri[0].ri.tex.texture,pisz *4);
 			for (var j=0;j < pisz;j++){
 				var riSaved=pri[j];
 				var ri=riSaved.ri;
 				if (ri.isSpace)continue ;
 				ri.touch();
-				ctx._drawTexRect(startx+riSaved.x,y+riSaved.y,riSaved.w,riSaved.h,ri.uv);
+				ctx.drawTexAlign=true;
+				ctx._inner_drawTexture(ri.tex.texture,(ri.tex.texture).bitmap.id,startx+riSaved.x ,y+riSaved.y ,riSaved.w,riSaved.h,null,ri.uv,1.0,isLastRender);
 				if ((ctx).touches){
 					(ctx).touches.push(ri);
 				}
 			}
 		}
 		ctx.setFillColor(lastColor);
-		ctx._curSubmit._key.other=-1;
 	}
 
 	//TODO:coverage
@@ -10078,7 +11357,7 @@ var CharBook=(function(){
 				var riSaved=pri[j];
 				var ri=riSaved.ri;
 				if (ri.isSpace)continue ;
-				ctx._drawTextureUseColor=CharBook.getFontBmpWithColor ? false :!riSaved.isEmoji;
+				ctx._drawTextureUseColor=false;
 				if (lastcolor !=riSaved.nColor){
 					ctx.fillStyle=riSaved.color;
 					lastcolor=riSaved.nColor;
@@ -10097,21 +11376,30 @@ var CharBook=(function(){
 		}
 	}
 
+	// for debug
+	__proto.listPages=function(){
+		var _$this=this;
+		console.log('打印所有页的信息:');
+		this.fontPages.forEach(function(cp,i){
+			var name=_$this.fontPagesName[i];
+			var minsz=parseInt(name.substr(cp.fontFamily.length))*CharBook.gridSize;
+			console.log('===================================');
+			console.log('名字:',_$this.fontPagesName[i],'大小范围:',minsz,minsz+CharBook.gridSize);
+			cp.printPagesInfo();
+		});
+	}
+
 	/**
 	*垃圾回收
 	*/
-	__proto.GC=function(){
+	__proto.GC=function(force){
 		var i=0,sz=this.fontPages.length;
-		if (sz){
-			var curCleanID=Stat.loopCount % sz;
-			(this.fontPages [curCleanID]).removeLRU();
-		}
+		this.fontPages.forEach(function(p){p.removeLRU();});
 	}
 
 	CharBook.textureWidth=512;
 	CharBook.cacheRenderInfoInWordText=true;
 	CharBook.scaleFontWithCtx=true;
-	CharBook.getFontBmpWithColor=true;
 	CharBook.gridSize=16;
 	CharBook.debug=false;
 	CharBook._curFont=null;
@@ -10122,7 +11410,7 @@ var CharBook=(function(){
 	CharBook._lastCharPage=null;
 	CharBook.isWan1Wan=false;
 	__static(CharBook,
-	['_emojiReg',function(){return this._emojiReg=/(?:0\u20E3|1\u20E3|2\u20E3|3\u20E3|4\u20E3|5\u20E3|6\u20E3|7\u20E3|8\u20E3|9\u20E3|#\u20E3|\*\u20E3|\uD83C(?:\uDDE6\uD83C(?:\uDDE8|\uDDE9|\uDDEA|\uDDEB|\uDDEC|\uDDEE|\uDDF1|\uDDF2|\uDDF4|\uDDF6|\uDDF7|\uDDF8|\uDDF9|\uDDFA|\uDDFC|\uDDFD|\uDDFF)|\uDDE7\uD83C(?:\uDDE6|\uDDE7|\uDDE9|\uDDEA|\uDDEB|\uDDEC|\uDDED|\uDDEE|\uDDEF|\uDDF1|\uDDF2|\uDDF3|\uDDF4|\uDDF6|\uDDF7|\uDDF8|\uDDF9|\uDDFB|\uDDFC|\uDDFE|\uDDFF)|\uDDE8\uD83C(?:\uDDE6|\uDDE8|\uDDE9|\uDDEB|\uDDEC|\uDDED|\uDDEE|\uDDF0|\uDDF1|\uDDF2|\uDDF3|\uDDF4|\uDDF5|\uDDF7|\uDDFA|\uDDFB|\uDDFC|\uDDFD|\uDDFE|\uDDFF)|\uDDE9\uD83C(?:\uDDEA|\uDDEC|\uDDEF|\uDDF0|\uDDF2|\uDDF4|\uDDFF)|\uDDEA\uD83C(?:\uDDE6|\uDDE8|\uDDEA|\uDDEC|\uDDED|\uDDF7|\uDDF8|\uDDF9|\uDDFA)|\uDDEB\uD83C(?:\uDDEE|\uDDEF|\uDDF0|\uDDF2|\uDDF4|\uDDF7)|\uDDEC\uD83C(?:\uDDE6|\uDDE7|\uDDE9|\uDDEA|\uDDEB|\uDDEC|\uDDED|\uDDEE|\uDDF1|\uDDF2|\uDDF3|\uDDF5|\uDDF6|\uDDF7|\uDDF8|\uDDF9|\uDDFA|\uDDFC|\uDDFE)|\uDDED\uD83C(?:\uDDF0|\uDDF2|\uDDF3|\uDDF7|\uDDF9|\uDDFA)|\uDDEE\uD83C(?:\uDDE8|\uDDE9|\uDDEA|\uDDF1|\uDDF2|\uDDF3|\uDDF4|\uDDF6|\uDDF7|\uDDF8|\uDDF9)|\uDDEF\uD83C(?:\uDDEA|\uDDF2|\uDDF4|\uDDF5)|\uDDF0\uD83C(?:\uDDEA|\uDDEC|\uDDED|\uDDEE|\uDDF2|\uDDF3|\uDDF5|\uDDF7|\uDDFC|\uDDFE|\uDDFF)|\uDDF1\uD83C(?:\uDDE6|\uDDE7|\uDDE8|\uDDEE|\uDDF0|\uDDF7|\uDDF8|\uDDF9|\uDDFA|\uDDFB|\uDDFE)|\uDDF2\uD83C(?:\uDDE6|\uDDE8|\uDDE9|\uDDEA|\uDDEB|\uDDEC|\uDDED|\uDDF0|\uDDF1|\uDDF2|\uDDF3|\uDDF4|\uDDF5|\uDDF6|\uDDF7|\uDDF8|\uDDF9|\uDDFA|\uDDFB|\uDDFC|\uDDFD|\uDDFE|\uDDFF)|\uDDF3\uD83C(?:\uDDE6|\uDDE8|\uDDEA|\uDDEB|\uDDEC|\uDDEE|\uDDF1|\uDDF4|\uDDF5|\uDDF7|\uDDFA|\uDDFF)|\uDDF4\uD83C\uDDF2|\uDDF5\uD83C(?:\uDDE6|\uDDEA|\uDDEB|\uDDEC|\uDDED|\uDDF0|\uDDF1|\uDDF2|\uDDF3|\uDDF7|\uDDF8|\uDDF9|\uDDFC|\uDDFE)|\uDDF6\uD83C\uDDE6|\uDDF7\uD83C(?:\uDDEA|\uDDF4|\uDDF8|\uDDFA|\uDDFC)|\uDDF8\uD83C(?:\uDDE6|\uDDE7|\uDDE8|\uDDE9|\uDDEA|\uDDEC|\uDDED|\uDDEE|\uDDEF|\uDDF0|\uDDF1|\uDDF2|\uDDF3|\uDDF4|\uDDF7|\uDDF8|\uDDF9|\uDDFB|\uDDFD|\uDDFE|\uDDFF)|\uDDF9\uD83C(?:\uDDE6|\uDDE8|\uDDE9|\uDDEB|\uDDEC|\uDDED|\uDDEF|\uDDF0|\uDDF1|\uDDF2|\uDDF3|\uDDF4|\uDDF7|\uDDF9|\uDDFB|\uDDFC|\uDDFF)|\uDDFA\uD83C(?:\uDDE6|\uDDEC|\uDDF2|\uDDF8|\uDDFE|\uDDFF)|\uDDFB\uD83C(?:\uDDE6|\uDDE8|\uDDEA|\uDDEC|\uDDEE|\uDDF3|\uDDFA)|\uDDFC\uD83C(?:\uDDEB|\uDDF8)|\uDDFD\uD83C\uDDF0|\uDDFE\uD83C(?:\uDDEA|\uDDF9)|\uDDFF\uD83C(?:\uDDE6|\uDDF2|\uDDFC)))|[\xA9\xAE\u203C\u2049\u2122\u2139\u2194-\u2199\u21A9\u21AA\u231A\u231B\u2328\u23CF\u23E9-\u23F3\u23F8-\u23FA\u24C2\u25AA\u25AB\u25B6\u25C0\u25FB-\u25FE\u2600-\u2604\u260E\u2611\u2614\u2615\u2618\u261D\u2620\u2622\u2623\u2626\u262A\u262E\u262F\u2638-\u263A\u2648-\u2653\u2660\u2663\u2665\u2666\u2668\u267B\u267F\u2692-\u2694\u2696\u2697\u2699\u269B\u269C\u26A0\u26A1\u26AA\u26AB\u26B0\u26B1\u26BD\u26BE\u26C4\u26C5\u26C8\u26CE\u26CF\u26D1\u26D3\u26D4\u26E9\u26EA\u26F0-\u26F5\u26F7-\u26FA\u26FD\u2702\u2705\u2708-\u270D\u270F\u2712\u2714\u2716\u271D\u2721\u2728\u2733\u2734\u2744\u2747\u274C\u274E\u2753-\u2755\u2757\u2763\u2764\u2795-\u2797\u27A1\u27B0\u27BF\u2934\u2935\u2B05-\u2B07\u2B1B\u2B1C\u2B50\u2B55\u3030\u303D\u3297\u3299]|\uD83C[\uDC04\uDCCF\uDD70\uDD71\uDD7E\uDD7F\uDD8E\uDD91-\uDD9A\uDE01\uDE02\uDE1A\uDE2F\uDE32-\uDE3A\uDE50\uDE51\uDF00-\uDF21\uDF24-\uDF93\uDF96\uDF97\uDF99-\uDF9B\uDF9E-\uDFF0\uDFF3-\uDFF5\uDFF7-\uDFFF]|\uD83D[\uDC00-\uDCFD\uDCFF-\uDD3D\uDD49-\uDD4E\uDD50-\uDD67\uDD6F\uDD70\uDD73-\uDD79\uDD87\uDD8A-\uDD8D\uDD90\uDD95\uDD96\uDDA5\uDDA8\uDDB1\uDDB2\uDDBC\uDDC2-\uDDC4\uDDD1-\uDDD3\uDDDC-\uDDDE\uDDE1\uDDE3\uDDEF\uDDF3\uDDFA-\uDE4F\uDE80-\uDEC5\uDECB-\uDED0\uDEE0-\uDEE5\uDEE9\uDEEB\uDEEC\uDEF0\uDEF3]|\uD83E[\uDD10-\uDD18\uDD80-\uDD84\uDDC0]/g;},'_uint32',function(){return this._uint32=new Uint32Array(1);},'trash',function(){return this.trash=new charPageTrash(CharBook.textureWidth);}
+	['_uint32',function(){return this._uint32=new Uint32Array(1);},'trash',function(){return this.trash=new charPageTrash(CharBook.textureWidth);}
 	]);
 	CharBook.__init$=function(){
 		/**
@@ -10152,6 +11440,7 @@ var CharBook=(function(){
 			__proto.discardPage=function(p){
 				this.clean();
 				if (!p)return;
+				p.genID++;
 				if (this.poolLen >=this.pool.length){
 					this.pool=this.pool.concat(new Array(10));
 				}
@@ -10492,6 +11781,8 @@ var DrawImageCmdNative=(function(){
 	*回收到对象池
 	*/
 	__proto.recover=function(){
+		this._texture._removeReference();
+		this._texture=null;
 		this._graphicsCmdEncoder=null;
 		Pool.recover("DrawImageCmd",this);
 	}
@@ -10583,6 +11874,7 @@ var DrawImageCmdNative=(function(){
 			cmd._paramData=/*__JS__ */new ParamData(29*4,true);
 			}{
 			cmd._texture=texture;
+			texture._addReference();
 			cmd._x=x;
 			cmd._y=y;
 			cmd._width=width;
@@ -11157,6 +12449,75 @@ var DrawCircleCmdNative=(function(){
 })()
 
 
+/**
+*文字贴图的大图集。
+*/
+//class laya.webgl.text.TextAtlas
+var TextAtlas=(function(){
+	function TextAtlas(){
+		this.texWidth=1024;
+		this.texHeight=1024;
+		this.atlasgrid=null;
+		this.protectDist=1;
+		this.texture=null;
+		this.charMaps={};
+		this.texHeight=this.texWidth=TextRender.atlasWidth;
+		this.texture=TextTexture.getTextTexture(this.texWidth,this.texHeight);
+		if (this.texWidth / TextAtlas.atlasGridW > 256){
+			TextAtlas.atlasGridW=Math.ceil(this.texWidth / 256);
+		}
+		this.atlasgrid=new AtlasGrid(this.texWidth / TextAtlas.atlasGridW,this.texHeight / TextAtlas.atlasGridW,this.texture.id);
+	}
+
+	__class(TextAtlas,'laya.webgl.text.TextAtlas');
+	var __proto=TextAtlas.prototype;
+	__proto.setProtecteDist=function(d){
+		this.protectDist=d;
+	}
+
+	/**
+	*如果返回null，则表示无法加入了
+	*分配的时候优先选择最接近自己高度的节点
+	*@param w
+	*@param h
+	*@return
+	*/
+	__proto.getAEmpty=function(w,h,pt){
+		var find=this.atlasgrid.addRect(1,Math.ceil(w / TextAtlas.atlasGridW),Math.ceil(h / TextAtlas.atlasGridW),pt);
+		if (find){
+			pt.x *=TextAtlas.atlasGridW;
+			pt.y *=TextAtlas.atlasGridW;
+		}
+		return find;
+	}
+
+	/*
+	public function pushData(data:ImageData,node:TextAtlasNode):void {
+		texture.addChar(data,node.x,node.y);
+	}
+
+	*/
+	__proto.destroy=function(){
+		for (var k in this.charMaps){
+			var ri=this.charMaps[k];
+			ri.deleted=true;
+		}
+		this.texture.discard();
+	}
+
+	__proto.printDebugInfo=function(){}
+	/**
+	*大图集格子单元的占用率，老的也算上了。只是表示这个大图集还能插入多少东西。
+	*/
+	__getset(0,__proto,'usedRate',function(){
+		return this.atlasgrid._used;
+	});
+
+	TextAtlas.atlasGridW=16;
+	return TextAtlas;
+})()
+
+
 //class laya.webgl.utils.RenderSprite3D extends laya.renders.RenderSprite
 var RenderSprite3D=(function(_super){
 	function RenderSprite3D(type,next){
@@ -11261,6 +12622,7 @@ var WebGLContext2D=(function(_super){
 	var ContextParams;
 	function WebGLContext2D(){
 		this._drawTriUseAbsMatrix=false;
+		//还原2D视口
 		this._id=++WebGLContext2D._COUNT;
 		//this._other=null;
 		//this._renderNextSubmitIndex=0;
@@ -11295,6 +12657,7 @@ var WebGLContext2D=(function(_super){
 		this._nBlendType=0;
 		//this._save=null;
 		//this._targets=null;
+		//this._charSubmitCache=null;
 		this._saveMark=null;
 		/**
 		*所cacheAs精灵
@@ -11312,6 +12675,7 @@ var WebGLContext2D=(function(_super){
 		this._flushCnt=0;
 		//给fillrect用
 		//this._colorFiler=null;
+		this.drawTexAlign=false;
 		/*******************************************start矢量绘制***************************************************/
 		this.mId=-1;
 		this.mHaveKey=false;
@@ -11356,6 +12720,7 @@ var WebGLContext2D=(function(_super){
 		this._curMat=null;
 		this._shader2D.destroy();
 		this._shader2D=null;
+		this._charSubmitCache.clear();
 		for (var i=0,n=this._submits._length;i < n;i++){
 			this._submits[i].releaseRender();
 		}
@@ -11381,6 +12746,7 @@ var WebGLContext2D=(function(_super){
 		--WebGLContext2D._contextcount;
 		this.sprite=null;
 		this._releaseMem();
+		this._charSubmitCache.destroy();
 		this._targets && this._targets.destroy();
 		this._targets=null;
 		this._mesh.destroy();
@@ -11390,6 +12756,7 @@ var WebGLContext2D=(function(_super){
 		if (!this._submits){
 			this._other=ContextParams.DEFAULT;
 			this._curMat=Matrix.create();
+			this._charSubmitCache=new CharSubmitCache();
 			this._mesh=MeshQuadTexture.getAMesh();
 			this.meshlist.push(this._mesh);
 			this._pathMesh=MeshVG.getAMesh();
@@ -11533,14 +12900,14 @@ var WebGLContext2D=(function(_super){
 	__proto._fillText=function(txt,words,x,y,fontStr,color,strokeColor,lineWidth,textAlign,underLine){
 		(underLine===void 0)&& (underLine=0);
 		if (txt)
-			WebGLContext2D._charBook.filltext(this,txt,x,y,fontStr,color,strokeColor,lineWidth,textAlign,underLine);
+			WebGLContext2D._textRender.filltext(this,txt,x,y,fontStr,color,strokeColor,lineWidth,textAlign,underLine);
 		else if(words)
-		WebGLContext2D._charBook.fillWords(this,words,x,y,fontStr,color,strokeColor,lineWidth);
+		WebGLContext2D._textRender.fillWords(this,words,x,y,fontStr,color,strokeColor,lineWidth);
 	}
 
 	__proto._fast_filltext=function(data,x,y,fontObj,color,strokeColor,lineWidth,textAlign,underLine){
 		(underLine===void 0)&& (underLine=0);
-		WebGLContext2D._charBook._fast_filltext(this,data,null,x,y,fontObj,color,strokeColor,lineWidth,textAlign,underLine);
+		WebGLContext2D._textRender._fast_filltext(this,data,null,x,y,fontObj,color,strokeColor,lineWidth,textAlign,underLine);
 	}
 
 	//TODO:coverage
@@ -11567,8 +12934,7 @@ var WebGLContext2D=(function(_super){
 	*@param lineWidth
 	*@param textAlign
 	*/
-	__proto.strokeWord=function(text,x,y,font,color,lineWidth,textAlign){
-		debugger;
+	__proto.strokeWord=function(text,x,y,font,color,lineWidth,textAlign){;
 		this._fillText(text,null,x,y,font,null,ColorUtils.create(color).strColor,lineWidth || 1,textAlign);
 	}
 
@@ -11593,7 +12959,7 @@ var WebGLContext2D=(function(_super){
 
 	__proto._fillRect=function(x,y,width,height,rgba){
 		var submit=this._curSubmit;
-		var sameKey=submit && (submit._key.submitType===/*laya.webgl.submit.Submit.KEY_DRAWTEXTURE*/2 && submit._key.blendShader===this._submitKey.blendShader);
+		var sameKey=submit && (submit._key.submitType===/*laya.webgl.submit.Submit.KEY_DRAWTEXTURE*/2 && submit._key.blendShader===this._nBlendType);
 		if (this._mesh.vertNum+4 > 65535){
 			this._mesh=MeshQuadTexture.getAMesh();
 			this.meshlist.push(this._mesh);
@@ -11606,9 +12972,9 @@ var WebGLContext2D=(function(_super){
 			if (!sameKey){
 				submit=this._curSubmit=SubmitTexture.create(this,this._mesh,Value2D.create(/*laya.webgl.shader.d2.ShaderDefines2D.TEXTURE2D*/0x01,0));
 				this._submits[this._submits._length++]=submit;
-				this.copyClipInfo(submit,this._globalClipMatrix);
+				this._copyClipInfo(submit,this._globalClipMatrix);
 				submit.shaderValue.textureHost=this._lastTex;
-				submit._key.copyFrom2(this._submitKey,/*laya.webgl.submit.Submit.KEY_DRAWTEXTURE*/2,(this._lastTex&&this._lastTex.bitmap)?this._lastTex.bitmap.id:-1);
+				submit._key.other=(this._lastTex && this._lastTex.bitmap)?this._lastTex.bitmap.id:-1
 				submit._renderType=/*laya.webgl.submit.Submit.TYPE_TEXTURE*/10016;
 			}
 			this._curSubmit._numEle+=6;
@@ -11682,7 +13048,7 @@ var WebGLContext2D=(function(_super){
 			(sv).u_TexRange=texture.uvrect;
 			submit=this._curSubmit=SubmitTexture.create(this,this._mesh,sv);
 			this._submits[this._submits._length++]=submit;
-			this.copyClipInfo(submit,this._globalClipMatrix);
+			this._copyClipInfo(submit,this._globalClipMatrix);
 			submit.shaderValue.textureHost=texture;
 			submit._renderType=/*laya.webgl.submit.Submit.TYPE_TEXTURE*/10016;
 			this._curSubmit._numEle+=6;
@@ -11715,7 +13081,7 @@ var WebGLContext2D=(function(_super){
 		var n=pos.length / 2;
 		var ipos=0;
 		for (var i=0;i < n;i++){
-			this._inner_drawTexture(tex,tex.bitmap.id,pos[ipos++]+tx,pos[ipos++]+ty,0,0,null,null,1.0);
+			this._inner_drawTexture(tex,tex.bitmap.id,pos[ipos++]+tx,pos[ipos++]+ty,0,0,null,null,1.0,false);
 		}
 	}
 
@@ -11725,7 +13091,7 @@ var WebGLContext2D=(function(_super){
 		submit=SubmitTexture.create(this,this._mesh,Value2D.create(/*laya.webgl.shader.d2.ShaderDefines2D.TEXTURE2D*/0x01,0));
 		this._submits[this._submits._length++]=submit;
 		submit.shaderValue.textureHost=tex;
-		submit._key.copyFrom2(this._submitKey,/*laya.webgl.submit.Submit.KEY_DRAWTEXTURE*/2,imgid);
+		submit._key.other=imgid;
 		submit._renderType=/*laya.webgl.submit.Submit.TYPE_TEXTURE*/10016;
 		this._curSubmit=submit;
 	}
@@ -11738,11 +13104,11 @@ var WebGLContext2D=(function(_super){
 			}
 			return false;
 		}
-		return this._inner_drawTexture(tex,tex.bitmap.id,x,y,width,height,m,uv,alpha);
+		return this._inner_drawTexture(tex,tex.bitmap.id,x,y,width,height,m,uv,alpha,false);
 	}
 
 	__proto._drawRenderTexture=function(tex,x,y,width,height,m,alpha,uv){
-		return this._inner_drawTexture(tex,-1,x,y,width,height,m,uv,1.0);
+		return this._inner_drawTexture(tex,-1,x,y,width,height,m,uv,1.0,false);
 	}
 
 	//TODO:coverage
@@ -11760,7 +13126,7 @@ var WebGLContext2D=(function(_super){
 	}
 
 	*/
-	__proto.copyClipInfo=function(submit,clipInfo){
+	__proto._copyClipInfo=function(submit,clipInfo){
 		var cm=submit.shaderValue.clipMatDir;
 		cm[0]=clipInfo.a;cm[1]=clipInfo.b;cm[2]=clipInfo.c;cm[3]=clipInfo.d;
 		var cmp=submit.shaderValue.clipMatPos;
@@ -11772,12 +13138,10 @@ var WebGLContext2D=(function(_super){
 		return (submit.clipInfoID===this._clipInfoID);
 	}
 
-	/*
-	var cd:Array=submit.shaderValue.clipDir;
-	var cp:Array=submit.shaderValue.clipRect;
-	if (clipInfo[0] !=cp[0] || clipInfo[1] !=cp[1] || clipInfo[2] !=cd[0] || clipInfo[3] !=cd[1] || clipInfo[4] !=cd[2] || clipInfo[5] !=cd[3] )
-		return false;
-	return true;
+	/**
+	*这个还是会检查是否合并
+	*@param tex
+	*@param minVertNum
 	*/
 	__proto._useNewTex2DSubmit=function(tex,minVertNum){
 		if (this._mesh.vertNum+minVertNum > 65535){
@@ -11787,7 +13151,7 @@ var WebGLContext2D=(function(_super){
 		var submit=SubmitTexture.create(this,this._mesh,Value2D.create(/*laya.webgl.shader.d2.ShaderDefines2D.TEXTURE2D*/0x01,0));
 		this._submits[this._submits._length++]=this._curSubmit=submit;
 		submit.shaderValue.textureHost=tex;
-		this.copyClipInfo(submit,this._globalClipMatrix);
+		this._copyClipInfo(submit,this._globalClipMatrix);
 	}
 
 	/**
@@ -11812,6 +13176,11 @@ var WebGLContext2D=(function(_super){
 		}
 	}
 
+	__proto.drawCallOptimize=function(enbale){
+		this._charSubmitCache.enable(enbale,this);
+		return enbale;
+	}
+
 	/**
 	*
 	*@param tex {Texture | RenderTexture }
@@ -11825,7 +13194,7 @@ var WebGLContext2D=(function(_super){
 	*@param uv
 	*@return
 	*/
-	__proto._inner_drawTexture=function(tex,imgid,x,y,width,height,m,uv,alpha){
+	__proto._inner_drawTexture=function(tex,imgid,x,y,width,height,m,uv,alpha,lastRender){
 		var preKey=this._curSubmit._key;
 		uv=uv || /*__JS__ */tex._uv
 		if (preKey.submitType===/*laya.webgl.submit.Submit.KEY_TRIANGLES*/4 && preKey.other===imgid){
@@ -11835,26 +13204,42 @@ var WebGLContext2D=(function(_super){
 			this.drawTriangles(tex,0,0,tv,(uv ),WebGLContext2D._drawTexToDrawTri_Index,m,alpha,null,'normal');
 			this._drawTriUseAbsMatrix=false;
 			return true;
+		};
+		var ops=lastRender?this._charSubmitCache.getPos():this._transedPoints;
+		this.transformQuad(x,y,width || tex.width,height || tex.height,this._italicDeg,m || this._curMat,ops);
+		if (this.drawTexAlign){
+			ops[0]=(ops[0]+0.5)| 0;
+			ops[1]=(ops[1]+0.5)| 0;
+			ops[2]=(ops[2]+0.5)| 0;
+			ops[3]=(ops[3]+0.5)| 0;
+			ops[4]=(ops[4]+0.5)| 0;
+			ops[5]=(ops[5]+0.5)| 0;
+			ops[6]=(ops[6]+0.5)| 0;
+			ops[7]=(ops[7]+0.5)| 0;
+			this.drawTexAlign=false;
+		};
+		var rgba=this._mixRGBandAlpha(0xffffffff,this._shader2D.ALPHA *alpha);
+		if (lastRender){
+			this._charSubmitCache.add(this,tex,imgid,ops,uv ,rgba);
+			return true;
 		}
 		this._drawCount++;
 		var sameKey=imgid >=0 && preKey.submitType===/*laya.webgl.submit.Submit.KEY_DRAWTEXTURE*/2 && preKey.other===imgid;
 		sameKey && (sameKey=sameKey&& this.isSameClipInfo(this._curSubmit));
 		this._lastTex=tex;
-		var rgba=this._mixRGBandAlpha(0xffffffff,this._shader2D.ALPHA *alpha);
 		if (this._mesh.vertNum+4 > 65535){
 			this._mesh=MeshQuadTexture.getAMesh();
 			this.meshlist.push(this._mesh);
 			sameKey=false;
 		}
-		this.transformQuad(x,y,width || tex.width,height || tex.height,this._italicDeg,m || this._curMat,this._transedPoints);
 		if (!this.clipedOff(this._transedPoints)){
-			this._mesh.addQuad(this._transedPoints,uv ,rgba,true);
+			this._mesh.addQuad(ops,uv ,rgba,true);
 			if (!sameKey){
 				var submit=SubmitTexture.create(this,this._mesh,Value2D.create(/*laya.webgl.shader.d2.ShaderDefines2D.TEXTURE2D*/0x01,0));
 				this._submits[this._submits._length++]=this._curSubmit=submit;
 				submit.shaderValue.textureHost=tex;
 				submit._key.other=imgid;
-				this.copyClipInfo(submit,this._globalClipMatrix);
+				this._copyClipInfo(submit,this._globalClipMatrix);
 			}
 			this._curSubmit._numEle+=6;
 			this._mesh.indexNum+=6;
@@ -11974,9 +13359,24 @@ var WebGLContext2D=(function(_super){
 	*@param ty
 	*@param alpha
 	*/
-	__proto.drawTextureWithTransform=function(tex,x,y,width,height,transform,tx,ty,alpha,blendMode){
+	__proto.drawTextureWithTransform=function(tex,x,y,width,height,transform,tx,ty,alpha,blendMode,colorfilter){
+		var oldcomp=null;
+		if (blendMode){
+			oldcomp=this.globalCompositeOperation;
+			this.globalCompositeOperation=blendMode;
+		};
+		var oldColorFilter=this._colorFiler;
+		if (colorfilter){
+			this.setColorFilter(colorfilter);
+		}
 		if (!transform){
 			this._drawTextureM(tex,x+tx,y+ty,width,height,null,alpha,null);
+			if (blendMode){
+				this.globalCompositeOperation=oldcomp;
+			}
+			if (colorfilter){
+				this.setColorFilter(oldColorFilter);
+			}
 			return;
 		};
 		var curMat=this._curMat;
@@ -11990,6 +13390,12 @@ var WebGLContext2D=(function(_super){
 			transform=WebGLContext2D._tmpMatrix;
 		}
 		this._drawTextureM(tex,x,y,width,height,transform,alpha,null);
+		if (blendMode){
+			this.globalCompositeOperation=oldcomp;
+		}
+		if (colorfilter){
+			this.setColorFilter(oldColorFilter);
+		}
 	}
 
 	/**
@@ -12010,7 +13416,8 @@ var WebGLContext2D=(function(_super){
 		RenderState2D.worldAlpha=1;
 		BaseShader.activeShader=null;
 		target.start();
-		target.clear(0,0,0,0);
+		if(context._submits._length>0)
+			target.clear(0,0,0,0);
 		context._curSubmit=Submit.RENDERBASE;
 		context.flush();
 		context.clear();
@@ -12034,21 +13441,20 @@ var WebGLContext2D=(function(_super){
 			this._drawRenderTexture(src._targets,x,y,width,height,null,1.0,RenderTexture2D.flipyuv);
 			this._curSubmit=Submit.RENDERBASE;
 			}else {
-			if ((src).touches){
-				((src).touches).forEach(function(v){v.touch();});
+			var canv=canvas;
+			if (canv.touches){
+				(canv.touches).forEach(function(v){v.touch();});
 			}
-			submit=SubmitCanvas.create(src,this._shader2D.ALPHA,this._shader2D.filters);
+			submit=SubmitCanvas.create(canvas,this._shader2D.ALPHA,this._shader2D.filters);
 			this._submits[this._submits._length++]=submit;
 			(submit)._key.clear();
-			var sx=width / canvas.width;
-			var sy=height / canvas.height;
 			var mat=(submit)._matrix;
 			this._curMat.copyTo(mat);
-			sx !=1 && sy !=1 && mat.scale(sx,sy);
 			var tx=mat.tx,ty=mat.ty;
 			mat.tx=mat.ty=0;
 			mat.transformPoint(Point.TEMP.setTo(x,y));
 			mat.translate(Point.TEMP.x+tx,Point.TEMP.y+ty);
+			Matrix.mul(canv.invMat,mat,mat);
 			this._curSubmit=Submit.RENDERBASE;
 		}
 	}
@@ -12066,7 +13472,7 @@ var WebGLContext2D=(function(_super){
 			this._mesh.addQuad(this._transedPoints,uv || Texture.DEF_UV,0xffffffff,true);
 			var submit=this._curSubmit=SubmitTarget.create(this,this._mesh,shaderValue,rt);
 			submit.blendType=(blend==-1)?this._nBlendType:blend;
-			this.copyClipInfo(submit,this._globalClipMatrix);
+			this._copyClipInfo(submit,this._globalClipMatrix);
 			submit._numEle=6;
 			this._mesh.indexNum+=6;
 			this._mesh.vertNum+=4;
@@ -12095,10 +13501,9 @@ var WebGLContext2D=(function(_super){
 			this._curSubmit=Submit.RENDERBASE;
 			needRestorFilter=oldColorFilter!=color;
 		};
-		var nBlend=BlendMode.TOINT[blendMode]||0;
 		var webGLImg=tex.bitmap;
 		var preKey=this._curSubmit._key;
-		var sameKey=preKey.submitType===/*laya.webgl.submit.Submit.KEY_TRIANGLES*/4 && preKey.other===webGLImg.id && preKey.blendShader==nBlend;
+		var sameKey=preKey.submitType===/*laya.webgl.submit.Submit.KEY_TRIANGLES*/4 && preKey.other===webGLImg.id && preKey.blendShader==this._nBlendType;
 		var rgba=this._mixRGBandAlpha(0xffffffff,this._shader2D.ALPHA *alpha);
 		var vertNum=vertices.length / 2;
 		var eleNum=indices.length;
@@ -12111,11 +13516,9 @@ var WebGLContext2D=(function(_super){
 			var submit=this._curSubmit=SubmitTexture.create(this,this._triangleMesh,Value2D.create(/*laya.webgl.shader.d2.ShaderDefines2D.TEXTURE2D*/0x01,0));
 			submit.shaderValue.textureHost=tex;
 			submit._renderType=/*laya.webgl.submit.Submit.TYPE_TEXTURE*/10016;
-			submit._key.blendShader=nBlend;
-			submit._blendFn=this._targets ? BlendMode.targetFns[nBlend] :BlendMode.fns[nBlend];
 			submit._key.submitType=/*laya.webgl.submit.Submit.KEY_TRIANGLES*/4;
 			submit._key.other=webGLImg.id;
-			this.copyClipInfo(submit,this._globalClipMatrix);
+			this._copyClipInfo(submit,this._globalClipMatrix);
 			this._submits[this._submits._length++]=submit;
 		}
 		if (!matrix){
@@ -12231,7 +13634,7 @@ var WebGLContext2D=(function(_super){
 	//TODO:coverage
 	__proto.drawMesh=function(x,y,ib,vb,numElement,mat,shader,shaderValues,startIndex){
 		(startIndex===void 0)&& (startIndex=0);
-		debugger;
+		;
 	}
 
 	__proto.addRenderObject=function(o){
@@ -12277,9 +13680,10 @@ var WebGLContext2D=(function(_super){
 		this._triangleMesh=MeshTexture.getAMesh();
 		this.meshlist.push(this._mesh,this._pathMesh,this._triangleMesh);
 		this._flushCnt++;
-		if (this._flushCnt % 600==0 && Render._context==this){
-			if(CharBook.charbookInst)
-				CharBook.charbookInst.GC();
+		if (this._flushCnt % 60==0 && Render._context==this){
+			var texRender=Laya['textRender'];
+			if(texRender)
+				texRender.GC(false);
 		}
 		return ret;
 	}
@@ -12319,32 +13723,20 @@ var WebGLContext2D=(function(_super){
 	*/
 	__proto.addPath=function(points,close,convex,dx,dy){
 		var ci=0;
-		var m=this._curMat;
-		if(this._curMat._bTransform){
-			for (var i=0,sz=points.length / 2;i < sz;i++){
-				var x1=points[ci]+dx,y1=points[ci+1]+dy;
-				points[ci]=x1*m.a+y1*m.c+m.tx;
-				points[ci+1]=x1*m.b+y1*m.d+m.ty;
-				ci+=2;
-			}
-			}else {
-			if (m.tx==0 && m.ty==0 && !dx && !dy){}
-				else {
-				for (i=0,sz=points.length / 2;i < sz;i++){
-					var x2=points[ci]+dx,y2=points[ci+1]+dy;
-					points[ci]=x2+m.tx;
-					points[ci+1]=y2+m.ty;
-					ci+=2;
-				}
-			}
+		for (var i=0,sz=points.length / 2;i < sz;i++){
+			var x1=points[ci]+dx,y1=points[ci+1]+dy;
+			points[ci]=x1;
+			points[ci+1]=y1;
+			ci+=2;
 		}
 		this._getPath().push(points,convex);
 	}
 
 	__proto.fill=function(){
+		var m=this._curMat;
 		var tPath=this._getPath();
 		var submit=this._curSubmit;
-		var sameKey=(submit._key.submitType===/*laya.webgl.submit.Submit.KEY_VG*/3 && submit._key.blendShader===this._submitKey.blendShader);
+		var sameKey=(submit._key.submitType===/*laya.webgl.submit.Submit.KEY_VG*/3 && submit._key.blendShader===this._nBlendType);
 		sameKey && (sameKey=sameKey&&this.isSameClipInfo(submit));
 		if (!sameKey){
 			this._curSubmit=this.addVGSubmit(this._pathMesh);
@@ -12357,6 +13749,29 @@ var WebGLContext2D=(function(_super){
 			var vertNum=p.path.length / 2;
 			if (vertNum < 3 ||(vertNum==3 && !p.convex))
 				continue ;
+			var cpath=p.path.concat();
+			var pi=0;
+			var xp=0,yp=0;
+			var _x=NaN,_y=NaN;
+			if (m._bTransform){
+				for (pi=0;pi < vertNum;pi++){
+					xp=pi << 1;
+					yp=xp+1;
+					_x=cpath[xp];
+					_y=cpath[yp];
+					cpath[xp]=m.a *_x+m.c *_y+m.tx;
+					cpath[yp]=m.b *_x+m.d *_y+m.ty;
+				}
+				}else {
+				for (pi=0;pi < vertNum;pi++){
+					xp=pi << 1;
+					yp=xp+1;
+					_x=cpath[xp];
+					_y=cpath[yp];
+					cpath[xp]=_x+m.tx;
+					cpath[yp]=_y+m.ty;
+				}
+			}
 			if (this._pathMesh.vertNum+vertNum > 65535){
 				this._curSubmit._numEle+=curEleNum;
 				curEleNum=0;
@@ -12375,14 +13790,14 @@ var WebGLContext2D=(function(_super){
 				}
 			}
 			else {
-				idx=Earcut.earcut(p.path,null,2);
+				idx=Earcut.earcut(cpath,null,2);
 				if (curvert > 0){
 					for (var ii=0;ii < idx.length;ii++){
 						idx[ii]+=curvert;
 					}
 				}
 			}
-			this._pathMesh.addVertAndIBToMesh(this,p.path,rgba,idx);
+			this._pathMesh.addVertAndIBToMesh(this,cpath,rgba,idx);
 			curEleNum+=idx.length;
 		}
 		this._curSubmit._numEle+=curEleNum;
@@ -12390,10 +13805,9 @@ var WebGLContext2D=(function(_super){
 
 	__proto.addVGSubmit=function(mesh){
 		var submit=Submit.createShape(this,mesh,0,Value2D.create(/*laya.webgl.shader.d2.ShaderDefines2D.PRIMITIVE*/0x04,0));
-		submit._key.blendShader=this._submitKey.blendShader;
 		submit._key.submitType=/*laya.webgl.submit.Submit.KEY_VG*/3;
 		this._submits[this._submits._length++]=submit;
-		this.copyClipInfo(submit,this._globalClipMatrix);
+		this._copyClipInfo(submit,this._globalClipMatrix);
 		return submit;
 	}
 
@@ -12402,7 +13816,7 @@ var WebGLContext2D=(function(_super){
 			var rgba=this.mixRGBandAlpha(this.strokeStyle._color.numColor);
 			var tPath=this._getPath();
 			var submit=this._curSubmit;
-			var sameKey=(submit._key.submitType===/*laya.webgl.submit.Submit.KEY_VG*/3 && submit._key.blendShader===this._submitKey.blendShader);
+			var sameKey=(submit._key.submitType===/*laya.webgl.submit.Submit.KEY_VG*/3 && submit._key.blendShader===this._nBlendType);
 			sameKey && (sameKey=sameKey&& this.isSameClipInfo(submit));
 			if (!sameKey){
 				this._curSubmit=this.addVGSubmit(this._pathMesh);
@@ -12424,7 +13838,31 @@ var WebGLContext2D=(function(_super){
 					this.meshlist.push(this._pathMesh);
 					this._curSubmit=this.addVGSubmit(this._pathMesh);
 				}
-				BasePoly.createLine2(p.path,idx,this.lineWidth,this._pathMesh.vertNum,vertex,p.loop,this._curMat);
+				BasePoly.createLine2(p.path,idx,this.lineWidth,this._pathMesh.vertNum,vertex,p.loop);
+				var ptnum=vertex.length / 2;
+				var m=this._curMat;
+				var pi=0;
+				var xp=0,yp=0;
+				var _x=NaN,_y=NaN;
+				if (m._bTransform){
+					for (pi=0;pi < ptnum;pi++){
+						xp=pi << 1;
+						yp=xp+1;
+						_x=vertex[xp];
+						_y=vertex[yp];
+						vertex[xp]=m.a *_x+m.c *_y+m.tx;
+						vertex[yp]=m.b *_x+m.d *_y+m.ty;
+					}
+					}else {
+					for (pi=0;pi < ptnum;pi++){
+						xp=pi << 1;
+						yp=xp+1;
+						_x=vertex[xp];
+						_y=vertex[yp];
+						vertex[xp]=_x+m.tx;
+						vertex[yp]=_y+m.ty;
+					}
+				}
 				this._pathMesh.addVertAndIBToMesh(this,vertex,rgba,idx);
 				curEleNum+=idx.length;
 			}
@@ -12432,17 +13870,11 @@ var WebGLContext2D=(function(_super){
 		}
 	}
 
-	__proto.moveTo=function(x,y,b){
-		(b===void 0)&& (b=true);
+	__proto.moveTo=function(x,y){
 		var tPath=this._getPath();
 		tPath.newPath();
 		tPath._lastOriX=x;
 		tPath._lastOriY=y;
-		if (b){
-			var _x1=x,_y1=y;
-			x=this._curMat.a *_x1+this._curMat.c *_y1+this._curMat.tx;
-			y=this._curMat.b *_x1+this._curMat.d *_y1+this._curMat.ty;
-		}
 		tPath.addPoint(x,y);
 	}
 
@@ -12452,18 +13884,12 @@ var WebGLContext2D=(function(_super){
 	*@param y
 	*@param b 是否应用矩阵
 	*/
-	__proto.lineTo=function(x,y,b){
-		(b===void 0)&& (b=true);
+	__proto.lineTo=function(x,y){
 		var tPath=this._getPath();
 		if (Math.abs(x-tPath._lastOriX)<1e-3 && Math.abs(y-tPath._lastOriY)<1e-3)
 			return;
 		tPath._lastOriX=x;
 		tPath._lastOriY=y;
-		if (b){
-			var _x1=x,_y1=y;
-			x=this._curMat.a *_x1+this._curMat.c *_y1+this._curMat.tx;
-			y=this._curMat.b *_x1+this._curMat.d *_y1+this._curMat.ty;
-		}
 		tPath.addPoint(x,y);
 	}
 
@@ -12541,8 +13967,8 @@ var WebGLContext2D=(function(_super){
 		var lastx=this._path._lastOriX,lasty=this._path._lastOriY;
 		var _x1=ptx1 ,_y1=pty1;
 		if (Math.abs(_x1-this._path._lastOriX)>0.1 || Math.abs(_y1-this._path._lastOriY)>0.1){
-			x=this._curMat.a *_x1+this._curMat.c *_y1+this._curMat.tx;
-			y=this._curMat.b *_x1+this._curMat.d *_y1+this._curMat.ty;
+			x=_x1;
+			y=_y1;
 			lastx=_x1;
 			lasty=_y1;
 			this._path.addPoint(x,y);
@@ -12557,9 +13983,6 @@ var WebGLContext2D=(function(_super){
 			x=cx+orix;
 			y=cy+oriy;
 			if (Math.abs(lastx-x)>0.1 || Math.abs(lasty-y)>0.1){
-				var _tx1=x,_ty1=y;
-				x=this._curMat.a *_tx1+this._curMat.c *_ty1+this._curMat.tx;
-				y=this._curMat.b *_tx1+this._curMat.d *_ty1+this._curMat.ty;
 				this._path.addPoint(x,y);
 				lastx=x;
 				lasty=y;
@@ -12612,10 +14035,7 @@ var WebGLContext2D=(function(_super){
 			dy=Math.sin(a);
 			x=cx+dx *r;
 			y=cy+dy *r;
-			if (x !=this._path._lastOriX|| y !=this._path._lastOriY){
-				var _tx1=x,_ty1=y;
-				x=this._curMat.a *_tx1+this._curMat.c *_ty1+this._curMat.tx;
-				y=this._curMat.b *_tx1+this._curMat.d *_ty1+this._curMat.ty;
+			if (x !=this._path._lastOriX || y !=this._path._lastOriY){
 				tPath.addPoint(x,y);
 			}
 		}
@@ -12624,9 +14044,6 @@ var WebGLContext2D=(function(_super){
 		x=cx+dx *r;
 		y=cy+dy *r;
 		if (x !=this._path._lastOriX|| y !=this._path._lastOriY){
-			var _x2=x,_y2=y;
-			x=this._curMat.a *_x2+this._curMat.c *_y2+this._curMat.tx;
-			y=this._curMat.b *_x2+this._curMat.d *_y2+this._curMat.ty;
 			tPath.addPoint(x,y);
 		}
 	}
@@ -12772,6 +14189,18 @@ var WebGLContext2D=(function(_super){
 
 	WebGLContext2D.__init__=function(){
 		ContextParams.DEFAULT=new ContextParams();
+		WebGLCacheAsNormalCanvas;
+	}
+
+	WebGLContext2D.set2DRenderConfig=function(){
+		var gl=LayaGL.instance;
+		WebGLContext.setBlend(gl,true);
+		WebGLContext.setBlendFunc(gl,/*laya.webgl.WebGLContext.ONE*/1,/*laya.webgl.WebGLContext.ONE_MINUS_SRC_ALPHA*/0x0303);
+		WebGLContext.setDepthTest(gl,false);
+		WebGLContext.setCullFace(gl,false);
+		WebGLContext.setDepthMask(gl,true);
+		WebGLContext.setFrontFace(gl,/*laya.webgl.WebGLContext.CCW*/0x0901);
+		gl.viewport(0,0,RenderState2D.width,RenderState2D.height);
 	}
 
 	WebGLContext2D._tempPoint=new Point();
@@ -12786,7 +14215,7 @@ var WebGLContext2D=(function(_super){
 	WebGLContext2D._clipID_Gen=0;
 	WebGLContext2D.defTexture=null;
 	__static(WebGLContext2D,
-	['_drawStyleTemp',function(){return this._drawStyleTemp=new DrawStyle(null);},'_keyMap',function(){return this._keyMap=new StringKey();},'_drawTexToDrawTri_Vert',function(){return this._drawTexToDrawTri_Vert=new Float32Array(8);},'_drawTexToDrawTri_Index',function(){return this._drawTexToDrawTri_Index=new Uint16Array([0,1,2,0,2,3]);},'_charBook',function(){return this._charBook=new CharBook();}
+	['_drawStyleTemp',function(){return this._drawStyleTemp=new DrawStyle(null);},'_keyMap',function(){return this._keyMap=new StringKey();},'_drawTexToDrawTri_Vert',function(){return this._drawTexToDrawTri_Vert=new Float32Array(8);},'_drawTexToDrawTri_Index',function(){return this._drawTexToDrawTri_Index=new Uint16Array([0,1,2,0,2,3]);},'_textRender',function(){return this._textRender=TextRender.useOldCharBook?new CharBook():(new TextRender());}
 	]);
 	WebGLContext2D.__init$=function(){
 		/*下面的方式是有bug的。canvas是直接save，restore，现在是为了优化，但是有bug，所以先不重载了
@@ -13142,6 +14571,7 @@ var ShaderDefines2D=(function(_super){
 		ShaderDefines2D.reg("WORLDMAT",0x80);
 		ShaderDefines2D.reg("FILLTEXTURE",0x100);
 		ShaderDefines2D.reg("FSHIGHPRECISION",0x400);
+		ShaderDefines2D.reg('MVP3D',0x800);
 	}
 
 	ShaderDefines2D.reg=function(name,value){
@@ -13166,6 +14596,7 @@ var ShaderDefines2D=(function(_super){
 	ShaderDefines2D.FILLTEXTURE=0x100;
 	ShaderDefines2D.SKINMESH=0x200;
 	ShaderDefines2D.SHADERDEFINE_FSHIGHPRECISION=0x400;
+	ShaderDefines2D.MVP3D=0x800;
 	ShaderDefines2D.NOOPTMASK=0x08|0x10|0x20|0x100;
 	ShaderDefines2D.__name2int={};
 	ShaderDefines2D.__int2name=[];
@@ -13176,16 +14607,29 @@ var ShaderDefines2D=(function(_super){
 
 //class laya.webgl.resource.CharRender_Canvas extends laya.webgl.resource.ICharRender
 var CharRender_Canvas=(function(_super){
-	function CharRender_Canvas(){
+	function CharRender_Canvas(maxw,maxh,scalefont,useImageData,showdbg){
 		this.lastScaleX=1.0;
 		this.lastScaleY=1.0;
 		this.needResetScale=false;
+		this.maxTexW=0;
+		this.maxTexH=0;
+		this.scaleFontSize=true;
+		this.showDbgInfo=false;
+		this.supportImageData=true;
 		CharRender_Canvas.__super.call(this);
+		(scalefont===void 0)&& (scalefont=true);
+		(useImageData===void 0)&& (useImageData=true);
+		(showdbg===void 0)&& (showdbg=false);
+		this.maxTexW=maxw;
+		this.maxTexH=maxh;
+		this.scaleFontSize=scalefont;
+		this.supportImageData=useImageData;
+		this.showDbgInfo=showdbg;
 		if (!CharRender_Canvas.canvas){
 			CharRender_Canvas.canvas=window.document.createElement('canvas');
-			CharRender_Canvas.canvas.width=512;
+			CharRender_Canvas.canvas.width=1024;
 			CharRender_Canvas.canvas.height=512;
-			CharRender_Canvas.canvas.style.left="-1000px";
+			CharRender_Canvas.canvas.style.left="-10000px";
 			CharRender_Canvas.canvas.style.position="absolute";
 			/*__JS__ */document.body.appendChild(CharRender_Canvas.canvas);;
 			CharRender_Canvas.ctx=CharRender_Canvas.canvas.getContext('2d');
@@ -13194,26 +14638,23 @@ var CharRender_Canvas=(function(_super){
 
 	__class(CharRender_Canvas,'laya.webgl.resource.CharRender_Canvas',_super);
 	var __proto=CharRender_Canvas.prototype;
-	__proto.getWidth=function(str){
+	__proto.getWidth=function(font,str){
 		if (!CharRender_Canvas.ctx)return 0;
-		if(CharRender_Canvas.ctx._lastFont!=CharBook._curFont){
-			CharRender_Canvas.ctx.font=CharBook._curFont;
-			CharRender_Canvas.ctx._lastFont=CharBook._curFont;
+		if(CharRender_Canvas.ctx._lastFont!=font){
+			CharRender_Canvas.ctx.font=font;
+			CharRender_Canvas.ctx._lastFont=font;
 		}
 		return CharRender_Canvas.ctx.measureText(str).width;
 	}
 
 	__proto.scale=function(sx,sy){
+		if (!this.supportImageData){
+			this.lastScaleX=sx;
+			this.lastScaleY=sy;
+			return;
+		}
 		if (this.lastScaleX !=sx || this.lastScaleY !=sy){
-			if (this.needResetScale){
-				CharRender_Canvas.ctx.restore();
-				this.lastScaleX=this.lastScaleY=1.0;
-			}
-			CharRender_Canvas.ctx.save();
-			this.needResetScale=true;
-			if(!CharBook.isWan1Wan){
-				CharRender_Canvas.ctx.scale(sx,sy);
-			}
+			CharRender_Canvas.ctx.setTransform(sx,0,0,sy,0,0);
 			this.lastScaleX=sx;
 			this.lastScaleY=sy;
 		}
@@ -13226,8 +14667,8 @@ var CharRender_Canvas=(function(_super){
 	*@param cri 修改里面的width。
 	*@return
 	*/
-	__proto.getCharBmp=function(char,font,lineWidth,colStr,strokeColStr,cri,margin_left,margin_top,margin_right,margin_bottom){
-		if (CharBook.isWan1Wan)
+	__proto.getCharBmp=function(char,font,lineWidth,colStr,strokeColStr,cri,margin_left,margin_top,margin_right,margin_bottom,rect){
+		if (!this.supportImageData)
 			return this.getCharCanvas(char,font,lineWidth,colStr,strokeColStr,cri,margin_left,margin_top,margin_right,margin_bottom);
 		if (CharRender_Canvas.ctx.font !=font){
 			CharRender_Canvas.ctx.font=font;
@@ -13238,7 +14679,18 @@ var CharRender_Canvas=(function(_super){
 		var h=cri.height*this.lastScaleY;
 		w+=(margin_left+margin_right)*this.lastScaleX;
 		h+=(margin_top+margin_bottom)*this.lastScaleY;
-		CharRender_Canvas.ctx.clearRect(0,0,w+1,h+1);
+		w=Math.ceil(w);
+		h=Math.ceil(h);
+		w=Math.min(w,laya.webgl.resource.CharRender_Canvas.canvas.width);
+		h=Math.min(h,laya.webgl.resource.CharRender_Canvas.canvas.height);
+		var clearW=w+lineWidth *2+1;
+		var clearH=h+lineWidth *2+1;
+		if (rect){
+			clearW=Math.max(clearW,rect[0]+rect[2]+1);
+			clearH=Math.max(clearH,rect[1]+rect[3]+1);
+		}
+		CharRender_Canvas.ctx.clearRect(0,0,clearW,clearH);
+		CharRender_Canvas.ctx.save();
 		CharRender_Canvas.ctx.textBaseline="top";
 		if (lineWidth > 0){
 			CharRender_Canvas.ctx.strokeStyle=strokeColStr;
@@ -13247,13 +14699,20 @@ var CharRender_Canvas=(function(_super){
 		}
 		CharRender_Canvas.ctx.fillStyle=colStr;
 		CharRender_Canvas.ctx.fillText(char,margin_left,margin_top);
-		if (CharBook.debug){
+		if (this.showDbgInfo){
 			CharRender_Canvas.ctx.strokeStyle='#ff0000';
 			CharRender_Canvas.ctx.strokeRect(0,0,w,h);
 			CharRender_Canvas.ctx.strokeStyle='#00ff00';
 			CharRender_Canvas.ctx.strokeRect(margin_left,margin_top,cri.width,cri.height);
 		}
-		return CharRender_Canvas.ctx.getImageData(0,0,w|0,h|0);
+		if (rect){
+			if (rect[2]==-1)rect[2]=Math.ceil((cri.width+lineWidth)*this.lastScaleX);
+		};
+		var imgdt=rect?(CharRender_Canvas.ctx.getImageData(rect[0],rect[1],rect[2],rect[3])):(CharRender_Canvas.ctx.getImageData(0,0,w,h));
+		CharRender_Canvas.ctx.restore();
+		cri.bmpWidth=imgdt.width;
+		cri.bmpHeight=imgdt.height;
+		return imgdt;
 	}
 
 	__proto.getCharCanvas=function(char,font,lineWidth,colStr,strokeColStr,cri,margin_left,margin_top,margin_right,margin_bottom){
@@ -13265,38 +14724,59 @@ var CharRender_Canvas=(function(_super){
 		var w=cri.width *this.lastScaleX;
 		var h=cri.height*this.lastScaleY;
 		w+=(margin_left+margin_right)*this.lastScaleX;
-		h+=(margin_top+margin_bottom)*this.lastScaleY;
-		CharRender_Canvas.canvas.width=w+1;
-		CharRender_Canvas.canvas.height=h+1;
+		h+=((margin_top+margin_bottom)*this.lastScaleY+1);
+		w=Math.min(w,this.maxTexW);
+		h=Math.min(h,this.maxTexH);
+		CharRender_Canvas.canvas.width=Math.min(w+1,this.maxTexW);
+		CharRender_Canvas.canvas.height=Math.min(h+1,this.maxTexH);
 		CharRender_Canvas.ctx.font=font;
-		this.needResetScale=false;
-		CharRender_Canvas.ctx.clearRect(0,0,w+1,h+1);
+		CharRender_Canvas.ctx.clearRect(0,0,w+1+lineWidth,h+1+lineWidth);
+		CharRender_Canvas.ctx.setTransform(1,0,0,1,0,0);
 		CharRender_Canvas.ctx.save();
-		CharRender_Canvas.ctx.translate(margin_left,margin_top);
-		if (CharBook.scaleFontWithCtx){
+		if (this.scaleFontSize){
 			CharRender_Canvas.ctx.scale(this.lastScaleX,this.lastScaleY);
 		}
+		CharRender_Canvas.ctx.translate(margin_left,margin_top);
 		CharRender_Canvas.ctx.textAlign="left";
 		CharRender_Canvas.ctx.textBaseline="top";
 		if (lineWidth > 0){
 			CharRender_Canvas.ctx.strokeStyle=strokeColStr;
 			CharRender_Canvas.ctx.fillStyle=colStr;
 			CharRender_Canvas.ctx.lineWidth=lineWidth;
-			CharRender_Canvas.ctx.strokeText(char,0,0);
-			CharRender_Canvas.ctx.fillText(char,0,0);
+			if (CharRender_Canvas.ctx.fillAndStrokeText){
+				CharRender_Canvas.ctx.fillAndStrokeText(char,0,0);
+				}else{
+				CharRender_Canvas.ctx.strokeText(char,0,0);
+				CharRender_Canvas.ctx.fillText(char,0,0);
+			}
 			}else {
 			CharRender_Canvas.ctx.fillStyle=colStr;
 			CharRender_Canvas.ctx.fillText(char,0,0);
 		}
-		if (CharBook.debug){
+		if (this.showDbgInfo){
 			CharRender_Canvas.ctx.strokeStyle='#ff0000';
 			CharRender_Canvas.ctx.strokeRect(0,0,w,h);
 			CharRender_Canvas.ctx.strokeStyle='#00ff00';
 			CharRender_Canvas.ctx.strokeRect(0,0,cri.width,cri.height);
 		}
 		CharRender_Canvas.ctx.restore();
+		cri.bmpWidth=CharRender_Canvas.canvas.width;
+		cri.bmpHeight=CharRender_Canvas.canvas.height;
 		return CharRender_Canvas.canvas;
 	}
+
+	__getset(0,__proto,'canvasWidth',function(){
+		return CharRender_Canvas.canvas.width;
+		},function(w){
+		if (CharRender_Canvas.canvas.width==w)
+			return;
+		CharRender_Canvas.canvas.width=w;
+		if (w > 2048){
+			console.warn("画文字设置的宽度太大，超过2048了");
+		}
+		CharRender_Canvas.ctx.setTransform(1,0,0,1,0,0);
+		CharRender_Canvas.ctx.scale(this.lastScaleX,this.lastScaleY);
+	});
 
 	CharRender_Canvas.canvas=null;
 	CharRender_Canvas.ctx=null;
@@ -13329,22 +14809,22 @@ var CharRender_Native=(function(_super){
 	__class(CharRender_Native,'laya.webgl.resource.CharRender_Native',_super);
 	var __proto=CharRender_Native.prototype;
 	//TODO:coverage
-	__proto.getWidth=function(str){
+	__proto.getWidth=function(font,str){
 		if (!window.conchTextCanvas)return 0;
-		if (this.lastFont !=CharBook._curFont){
-			window.conchTextCanvas.font=CharBook._curFont;
-			this.lastFont=CharBook._curFont;
+		if (this.lastFont !=font){
+			window.conchTextCanvas.font=font;
+			this.lastFont=font;
 		}
 		return window.conchTextCanvas.measureText(str).width;
 	}
 
 	__proto.scale=function(sx,sy){}
 	//TODO:coverage
-	__proto.getCharBmp=function(char,font,lineWidth,colStr,strokeColStr,size,margin_left,margin_top,margin_right,margin_bottom){
+	__proto.getCharBmp=function(char,font,lineWidth,colStr,strokeColStr,size,margin_left,margin_top,margin_right,margin_bottom,rect){
 		if (!window.conchTextCanvas)return null;
 		if(this.lastFont!=font){
-			window.conchTextCanvas.font=CharBook._curFont;
-			this.lastFont=CharBook._curFont;
+			window.conchTextCanvas.font=font;
+			this.lastFont=font;
 		};
 		var w=size.width=window.conchTextCanvas.measureText(char).width;
 		var h=size.height;
@@ -13355,11 +14835,97 @@ var CharRender_Native=(function(_super){
 		var c2=ColorUtils.create(colStr);
 		var nTextColor=c2.numColor;
 		var textInfo=window.conchTextCanvas.getTextBitmapData(char,nTextColor,lineWidth>2?2:lineWidth,nStrokeColor);
+		size.bmpWidth=textInfo.width;
+		size.bmpHeight=textInfo.height;
 		return textInfo;
 	}
 
 	return CharRender_Native;
 })(ICharRender)
+
+
+/**
+*cache as normal 模式下的生成的canvas的渲染。
+*/
+//class laya.webgl.submit.SubmitCanvas extends laya.webgl.submit.Submit
+var SubmitCanvas=(function(_super){
+	function SubmitCanvas(){
+		//this.canv=null;
+		this._matrix=new Matrix();
+		this._matrix4=CONST3D2D.defaultMatrix4.concat();
+		SubmitCanvas.__super.call(this,/*laya.webgl.submit.Submit.TYPE_2D*/10000);
+		this.shaderValue=new Value2D(0,0);
+	}
+
+	__class(SubmitCanvas,'laya.webgl.submit.SubmitCanvas',_super);
+	var __proto=SubmitCanvas.prototype;
+	__proto.renderSubmit=function(){
+		var preAlpha=RenderState2D.worldAlpha;
+		var preMatrix4=RenderState2D.worldMatrix4;
+		var preMatrix=RenderState2D.worldMatrix;
+		var preFilters=RenderState2D.worldFilters;
+		var preWorldShaderDefines=RenderState2D.worldShaderDefines;
+		var v=this.shaderValue;
+		var m=this._matrix;
+		var m4=this._matrix4;
+		var mout=Matrix.TEMP;
+		Matrix.mul(m,preMatrix,mout);
+		m4[0]=mout.a;
+		m4[1]=mout.b;
+		m4[4]=mout.c;
+		m4[5]=mout.d;
+		m4[12]=mout.tx;
+		m4[13]=mout.ty;
+		RenderState2D.worldMatrix=mout.clone();
+		RenderState2D.worldMatrix4=m4;
+		RenderState2D.worldAlpha=RenderState2D.worldAlpha *v.alpha;
+		if (v.filters && v.filters.length){
+			RenderState2D.worldFilters=v.filters;
+			RenderState2D.worldShaderDefines=v.defines;
+		}
+		this.canv['flushsubmit']();
+		RenderState2D.worldAlpha=preAlpha;
+		RenderState2D.worldMatrix4=preMatrix4;
+		RenderState2D.worldMatrix.destroy();
+		RenderState2D.worldMatrix=preMatrix;
+		RenderState2D.worldFilters=preFilters;
+		RenderState2D.worldShaderDefines=preWorldShaderDefines;
+		return 1;
+	}
+
+	__proto.releaseRender=function(){
+		if((--this._ref)<1){
+			var cache=SubmitCanvas.POOL;
+			this._mesh=null;
+			cache[cache._length++]=this;
+		}
+	}
+
+	//TODO:coverage
+	__proto.clone=function(context,mesh,pos){
+		return null;
+	}
+
+	//TODO:coverage
+	__proto.getRenderType=function(){
+		return /*laya.webgl.submit.Submit.TYPE_CANVAS*/10003;
+	}
+
+	SubmitCanvas.create=function(canvas,alpha,filters){
+		var o=(!SubmitCanvas.POOL._length)? (new SubmitCanvas()):SubmitCanvas.POOL[--SubmitCanvas.POOL._length];
+		o.canv=canvas;
+		o._ref=1;
+		o._numEle=0;
+		var v=o.shaderValue;
+		v.alpha=alpha;
+		v.defines.setValue(0);
+		filters && filters.length && v.setFilters(filters);
+		return o;
+	}
+
+	SubmitCanvas.POOL=(SubmitCanvas.POOL=[],SubmitCanvas.POOL._length=0,SubmitCanvas.POOL);
+	return SubmitCanvas;
+})(Submit)
 
 
 /**
@@ -13427,91 +14993,269 @@ var MeshParticle2D=(function(_super){
 })(Mesh2D)
 
 
-//class laya.webgl.submit.SubmitCanvas extends laya.webgl.submit.Submit
-var SubmitCanvas=(function(_super){
-	function SubmitCanvas(){
-		//this._ctx_src=null;
-		this._matrix=new Matrix();
-		this._matrix4=CONST3D2D.defaultMatrix4.concat();
-		SubmitCanvas.__super.call(this,/*laya.webgl.submit.Submit.TYPE_2D*/10000);
-		this.shaderValue=new Value2D(0,0);
+//class laya.webgl.utils.Buffer2D extends laya.webgl.utils.Buffer
+var Buffer2D=(function(_super){
+	function Buffer2D(){
+		this._maxsize=0;
+		this._upload=true;
+		this._uploadSize=0;
+		this._bufferSize=0;
+		this._u8Array=null;
+		Buffer2D.__super.call(this);
 	}
 
-	__class(SubmitCanvas,'laya.webgl.submit.SubmitCanvas',_super);
-	var __proto=SubmitCanvas.prototype;
-	__proto.renderSubmit=function(){
-		if (this._ctx_src._targets){
-			alert('nimei');
-			debugger;
-			return 1;
-		};
-		var preAlpha=RenderState2D.worldAlpha;
-		var preMatrix4=RenderState2D.worldMatrix4;
-		var preMatrix=RenderState2D.worldMatrix;
-		var preFilters=RenderState2D.worldFilters;
-		var preWorldShaderDefines=RenderState2D.worldShaderDefines;
-		var v=this.shaderValue;
-		var m=this._matrix;
-		var m4=this._matrix4;
-		var mout=Matrix.TEMP;
-		Matrix.mul(m,preMatrix,mout);
-		m4[0]=mout.a;
-		m4[1]=mout.b;
-		m4[4]=mout.c;
-		m4[5]=mout.d;
-		m4[12]=mout.tx;
-		m4[13]=mout.ty;
-		RenderState2D.worldMatrix=mout.clone();
-		RenderState2D.worldMatrix4=m4;
-		RenderState2D.worldAlpha=RenderState2D.worldAlpha *v.alpha;
-		if (v.filters && v.filters.length){
-			RenderState2D.worldFilters=v.filters;
-			RenderState2D.worldShaderDefines=v.defines;
-		}
-		this._ctx_src.flush();
-		RenderState2D.worldAlpha=preAlpha;
-		RenderState2D.worldMatrix4=preMatrix4;
-		RenderState2D.worldMatrix.destroy();
-		RenderState2D.worldMatrix=preMatrix;
-		RenderState2D.worldFilters=preFilters;
-		RenderState2D.worldShaderDefines=preWorldShaderDefines;
-		return 1;
-	}
-
-	__proto.releaseRender=function(){
-		if((--this._ref)<1){
-			var cache=SubmitCanvas.POOL;
-			this._ctx_src=null;
-			this._mesh=null;
-			cache[cache._length++]=this;
+	__class(Buffer2D,'laya.webgl.utils.Buffer2D',_super);
+	var __proto=Buffer2D.prototype;
+	__proto.setByteLength=function(value){
+		if (this._byteLength!==value){
+			value <=this._bufferSize || (this._resizeBuffer(value *2+256,true));
+			this._byteLength=value;
 		}
 	}
 
-	//TODO:coverage
-	__proto.clone=function(context,mesh,pos){
-		return null;
+	/**
+	*在当前的基础上需要多大空间，单位是byte
+	*@param sz
+	*@return 增加大小之前的写位置。单位是byte
+	*/
+	__proto.needSize=function(sz){
+		var old=this._byteLength;
+		if (sz){
+			var needsz=this._byteLength+sz;
+			needsz <=this._bufferSize || (this._resizeBuffer(needsz << 1,true));
+			this._byteLength=needsz;
+		}
+		return old;
+	}
+
+	__proto._bufferData=function(){
+		this._maxsize=Math.max(this._maxsize,this._byteLength);
+		if (Stat.loopCount % 30==0){
+			if (this._buffer.byteLength > (this._maxsize+64)){
+				this._buffer=this._buffer.slice(0,this._maxsize+64);
+				this._bufferSize=this._buffer.byteLength;
+				this._checkArrayUse();
+			}
+			this._maxsize=this._byteLength;
+		}
+		if (this._uploadSize < this._buffer.byteLength){
+			this._uploadSize=this._buffer.byteLength;
+			LayaGL.instance.bufferData(this._bufferType,this._uploadSize,this._bufferUsage);
+		}
+		LayaGL.instance.bufferSubData(this._bufferType,0,this._buffer);
 	}
 
 	//TODO:coverage
-	__proto.getRenderType=function(){
-		return /*laya.webgl.submit.Submit.TYPE_CANVAS*/10003;
+	__proto._bufferSubData=function(offset,dataStart,dataLength){
+		(offset===void 0)&& (offset=0);
+		(dataStart===void 0)&& (dataStart=0);
+		(dataLength===void 0)&& (dataLength=0);
+		this._maxsize=Math.max(this._maxsize,this._byteLength);
+		if (Stat.loopCount % 30==0){
+			if (this._buffer.byteLength > (this._maxsize+64)){
+				this._buffer=this._buffer.slice(0,this._maxsize+64);
+				this._bufferSize=this._buffer.byteLength;
+				this._checkArrayUse();
+			}
+			this._maxsize=this._byteLength;
+		}
+		if (this._uploadSize < this._buffer.byteLength){
+			this._uploadSize=this._buffer.byteLength;
+			LayaGL.instance.bufferData(this._bufferType,this._uploadSize,this._bufferUsage);
+		}
+		if (dataStart || dataLength){
+			var subBuffer=this._buffer.slice(dataStart,dataLength);
+			LayaGL.instance.bufferSubData(this._bufferType,offset,subBuffer);
+			}else {
+			LayaGL.instance.bufferSubData(this._bufferType,offset,this._buffer);
+		}
 	}
 
-	SubmitCanvas.create=function(ctx_src,alpha,filters){
-		var o=(!SubmitCanvas.POOL._length)? (new SubmitCanvas()):SubmitCanvas.POOL[--SubmitCanvas.POOL._length];
-		o._ctx_src=ctx_src;
-		o._ref=1;
-		o._numEle=0;
-		var v=o.shaderValue;
-		v.alpha=alpha;
-		v.defines.setValue(0);
-		filters && filters.length && v.setFilters(filters);
-		return o;
+	/**
+	*buffer重新分配了，继承类根据需要做相应的处理。
+	*/
+	__proto._checkArrayUse=function(){}
+	/**
+	*给vao使用的 _bind_upload函数。不要与已经绑定的判断是否相同
+	*@return
+	*/
+	__proto._bind_uploadForVAO=function(){
+		if (!this._upload)
+			return false;
+		this._upload=false;
+		this._bindForVAO();
+		this._bufferData();
+		return true;
 	}
 
-	SubmitCanvas.POOL=(SubmitCanvas.POOL=[],SubmitCanvas.POOL._length=0,SubmitCanvas.POOL);
-	return SubmitCanvas;
-})(Submit)
+	__proto._bind_upload=function(){
+		if (!this._upload)
+			return false;
+		this._upload=false;
+		this.bind();
+		this._bufferData();
+		return true;
+	}
+
+	//TODO:coverage
+	__proto._bind_subUpload=function(offset,dataStart,dataLength){
+		(offset===void 0)&& (offset=0);
+		(dataStart===void 0)&& (dataStart=0);
+		(dataLength===void 0)&& (dataLength=0);
+		if (!this._upload)
+			return false;
+		this._upload=false;
+		this.bind();
+		this._bufferSubData(offset,dataStart,dataLength);
+		return true;
+	}
+
+	/**
+	*重新分配buffer大小，如果nsz比原来的小则什么都不做。
+	*@param nsz buffer大小，单位是byte。
+	*@param copy 是否拷贝原来的buffer的数据。
+	*@return
+	*/
+	__proto._resizeBuffer=function(nsz,copy){
+		if (nsz < this._buffer.byteLength)
+			return this;
+		if (copy && this._buffer && this._buffer.byteLength > 0){
+			var newbuffer=new ArrayBuffer(nsz);
+			var oldU8Arr=(this._u8Array && this._u8Array.buffer==this._buffer)?this._u8Array :new Uint8Array(this._buffer);
+			this._u8Array=new Uint8Array(newbuffer);
+			this._u8Array.set(oldU8Arr,0);
+			this._buffer=newbuffer;
+			}else{
+			this._buffer=new ArrayBuffer(nsz);
+		}
+		this._checkArrayUse();
+		this._upload=true;
+		this._bufferSize=this._buffer.byteLength;
+		return this;
+	}
+
+	__proto.append=function(data){
+		this._upload=true;
+		var byteLen=0,n;
+		byteLen=data.byteLength;
+		if ((data instanceof Uint8Array)){
+			this._resizeBuffer(this._byteLength+byteLen,true);
+			n=new Uint8Array(this._buffer,this._byteLength);
+			}else if ((data instanceof Uint16Array)){
+			this._resizeBuffer(this._byteLength+byteLen,true);
+			n=new Uint16Array(this._buffer,this._byteLength);
+			}else if ((data instanceof Float32Array)){
+			this._resizeBuffer(this._byteLength+byteLen,true);
+			n=new Float32Array(this._buffer,this._byteLength);
+		}
+		n.set(data,0);
+		this._byteLength+=byteLen;
+		this._checkArrayUse();
+	}
+
+	//TODO:coverage
+	__proto.appendU16Array=function(data,len){
+		this._resizeBuffer(this._byteLength+len*2,true);
+		var u=new Uint16Array(this._buffer,this._byteLength,len);
+		for (var i=0;i < len;i++){
+			u[i]=data[i];
+		}
+		this._byteLength+=len *2;
+		this._checkArrayUse();
+	}
+
+	//TODO:coverage
+	__proto.appendEx=function(data,type){
+		this._upload=true;
+		var byteLen=0,n;
+		byteLen=data.byteLength;
+		this._resizeBuffer(this._byteLength+byteLen,true);
+		n=new type(this._buffer,this._byteLength);
+		n.set(data,0);
+		this._byteLength+=byteLen;
+		this._checkArrayUse();
+	}
+
+	//TODO:coverage
+	__proto.appendEx2=function(data,type,dataLen,perDataLen){
+		(perDataLen===void 0)&& (perDataLen=1);
+		this._upload=true;
+		var byteLen=0,n;
+		byteLen=dataLen*perDataLen;
+		this._resizeBuffer(this._byteLength+byteLen,true);
+		n=new type(this._buffer,this._byteLength);
+		var i=0;
+		for (i=0;i < dataLen;i++){
+			n[i]=data[i];
+		}
+		this._byteLength+=byteLen;
+		this._checkArrayUse();
+	}
+
+	//TODO:coverage
+	__proto.getBuffer=function(){
+		return this._buffer;
+	}
+
+	__proto.setNeedUpload=function(){
+		this._upload=true;
+	}
+
+	//TODO:coverage
+	__proto.getNeedUpload=function(){
+		return this._upload;
+	}
+
+	//TODO:coverage
+	__proto.upload=function(){
+		var scuess=this._bind_upload();
+		LayaGL.instance.bindBuffer(this._bufferType,null);
+		if(this._bufferType==/*laya.webgl.WebGLContext.ARRAY_BUFFER*/0x8892)Buffer._bindedVertexBuffer=null;
+		if(this._bufferType==/*laya.webgl.WebGLContext.ELEMENT_ARRAY_BUFFER*/0x8893)Buffer._bindedIndexBuffer=null;
+		BaseShader.activeShader=null
+		return scuess;
+	}
+
+	//TODO:coverage
+	__proto.subUpload=function(offset,dataStart,dataLength){
+		(offset===void 0)&& (offset=0);
+		(dataStart===void 0)&& (dataStart=0);
+		(dataLength===void 0)&& (dataLength=0);
+		var scuess=this._bind_subUpload();
+		LayaGL.instance.bindBuffer(this._bufferType,null);
+		if(this._bufferType==/*laya.webgl.WebGLContext.ARRAY_BUFFER*/0x8892)Buffer._bindedVertexBuffer=null;
+		if(this._bufferType==/*laya.webgl.WebGLContext.ELEMENT_ARRAY_BUFFER*/0x8893)Buffer._bindedIndexBuffer=null;
+		BaseShader.activeShader=null
+		return scuess;
+	}
+
+	__proto._disposeResource=function(){
+		this._upload=true;
+		this._uploadSize=0;
+	}
+
+	/**
+	*清理数据。保留ArrayBuffer
+	*/
+	__proto.clear=function(){
+		this._byteLength=0;
+		this._upload=true;
+	}
+
+	//反正常常要拷贝老的数据，所以保留这个可以提高效率
+	__getset(0,__proto,'bufferLength',function(){
+		return this._buffer.byteLength;
+	});
+
+	__getset(0,__proto,'byteLength',null,function(value){
+		this.setByteLength(value);
+	});
+
+	Buffer2D.__int__=function(gl){}
+	Buffer2D.FLOAT32=4;
+	Buffer2D.SHORT=2;
+	return Buffer2D;
+})(Buffer)
 
 
 //class laya.webgl.submit.SubmitTexture extends laya.webgl.submit.Submit
@@ -13566,7 +15310,7 @@ var SubmitTexture=(function(_super){
 			this.shaderValue.upload();
 		}
 		gl.drawElements(/*laya.webgl.WebGLContext.TRIANGLES*/0x0004,this._numEle,/*laya.webgl.WebGLContext.UNSIGNED_SHORT*/0x1403,this._startIdx);
-		Stat.drawCall++;
+		Stat.renderBatch++;
 		Stat.trianglesFaces+=this._numEle / 3;
 		return 1;
 	}
@@ -13641,6 +15385,9 @@ var CharPageTexture=(function(_super){
 		this.__destroyed=false;
 		//父类有，但是private
 		this._discardTm=0;
+		//释放的时间。超过一定时间会被真正删除
+		this.genID=0;
+		this.ArrCharRenderInfo=[];
 		CharPageTexture.__super.call(this);
 		this._texW=textureW;
 		this._texH=textureH;
@@ -13653,7 +15400,7 @@ var CharPageTexture=(function(_super){
 	__class(CharPageTexture,'laya.webgl.resource.CharPageTexture',_super);
 	var __proto=CharPageTexture.prototype;
 	/**
-	*找一个空余的格子。只操作格子相关变量
+	*找一个空余的格子。
 	*@return
 	*/
 	__proto.findAGrid=function(){
@@ -13661,14 +15408,20 @@ var CharPageTexture=(function(_super){
 			if (this._used[i]==0){
 				this._startFindPos=i+1;
 				this._used[i]=1;
-				return i;
+				var ri=this.ArrCharRenderInfo[i]=new CharRenderInfo();
+				ri.tex=this;
+				ri.pos=i;
+				return ri;
 			}
 		}
-		return-1;
+		return null;
 	}
 
 	//TODO:coverage
 	__proto.removeGrid=function(pos){
+		if(this.ArrCharRenderInfo[pos]){
+			this.ArrCharRenderInfo[pos].deleted=true;
+		}
 		this._used[pos]=0;
 		if (pos < this._startFindPos)
 			this._startFindPos=pos;
@@ -13704,10 +15457,11 @@ var CharPageTexture=(function(_super){
 		this._score=0;
 		this._scoreTick=0;
 		this.__destroyed=true;
+		this.ArrCharRenderInfo.forEach(function(v){v.deleted=true;});
 	}
 
-	//表示已经失效了，CharBook中使用的时候，会根据这个来判断是会否还能使用缓存的数据。
 	__proto.setGridNum=function(gridNum){
+		this._gridNum=gridNum;
 		if (!this._used || this._used.length !=this._gridNum){
 			this._used=new Uint8Array(gridNum);
 			}else {
@@ -13776,53 +15530,52 @@ var CharPageTexture=(function(_super){
 		var gl=Render.isConchApp?LayaGL.instance.getDefaultCommandEncoder():WebGL.mainContext;
 		this._source && gl.deleteTexture(this._source);
 		this._source=null;
+		this.ArrCharRenderInfo.forEach(function(v){v.deleted=true;});
+	}
+
+	__proto.touchRect=function(ri,curloop){
+		if(this._scoreTick!=curloop){
+			this._score=0;
+			this._scoreTick=curloop;
+		}
+		this._score++;
+	}
+
+	/**
+	*打印调试相关的关键信息
+	*/
+	__proto.printDebugInfo=function(detail){
+		(detail===void 0)&& (detail=false);
+		console.log('。得分:',this._score,', 算分时间:',this._scoreTick,',格子数:',this._gridNum);
+		var gridw=Math.sqrt(this._gridNum);
+		var num=0;
+		for (var i=0,sz=this.charMaps.length;i < sz;i++){
+			var charMap=this.charMaps[i];
+			if (!charMap)continue ;
+			var me=this;
+			var data='';
+			if (detail){
+				console.log('   与基本大小差'+i+'的map信息:');
+			}
+			charMap.forEach(function(v,k,m){
+				if (v){
+					if (detail){
+						console.log(
+						'      key:',k,
+						' 位置:',(v.pos / gridw)| 0,(v.pos % gridw)| 0,
+						' 宽高:',v.bmpWidth,v.bmpHeight,
+						' 是否删除:',v.deleted,
+						' touch时间:',v.touchTick);
+					}else
+					data+=k;
+				}
+			});
+			if(!detail)
+				console.log('data[',i,']:',data);
+		}
 	}
 
 	return CharPageTexture;
-})(Resource)
-
-
-//class laya.webgl.utils.Buffer extends laya.resource.Resource
-var Buffer=(function(_super){
-	function Buffer(){
-		//当前gl绑定的indexBuffer
-		this._glBuffer=null;
-		this._buffer=null;
-		//可能为Float32Array、Uint16Array、Uint8Array、ArrayBuffer等。
-		this._bufferType=0;
-		this._bufferUsage=0;
-		this._byteLength=0;
-		Buffer.__super.call(this);
-		this._glBuffer=LayaGL.instance.createBuffer()
-	}
-
-	__class(Buffer,'laya.webgl.utils.Buffer',_super);
-	var __proto=Buffer.prototype;
-	/**
-	*@private
-	*绕过全局状态判断,例如VAO局部状态设置
-	*/
-	__proto._bindForVAO=function(){}
-	//TODO:coverage
-	__proto.bind=function(){
-		return false;
-	}
-
-	__proto._disposeResource=function(){
-		if (this._glBuffer){
-			LayaGL.instance.deleteBuffer(this._glBuffer);
-			this._glBuffer=null;
-		}
-		this._setGPUMemory(0);
-	}
-
-	__getset(0,__proto,'bufferUsage',function(){
-		return this._bufferUsage;
-	});
-
-	Buffer._bindedVertexBuffer=null;
-	Buffer._bindedIndexBuffer=null;
-	return Buffer;
 })(Resource)
 
 
@@ -13892,6 +15645,8 @@ var ConchSpriteAdpt=(function(_super){
 		this._datai32[ /*laya.display.SpriteConst.POSBLEND_SRC*/71]=/*laya.webgl.WebGLContext.ONE*/1;
 		this._datai32[ /*laya.display.SpriteConst.POSBLEND_DEST*/72]=/*laya.webgl.WebGLContext.ONE_MINUS_SRC_ALPHA*/0x0303;
 		this._datai32[ /*laya.display.SpriteConst.POSGRAPHICS_CALLBACK_FUN_ID*/68]=-1;
+		this._renderType |=/*laya.display.SpriteConst.TRANSFORM*/0x02;
+		this._setRenderType(this._renderType);
 	}
 
 	//TODO:coverage
@@ -13909,6 +15664,12 @@ var ConchSpriteAdpt=(function(_super){
 		f32[ /*laya.display.SpriteConst.POSMATRIX*/16+3]=value.d;
 		f32[ /*laya.display.SpriteConst.POSMATRIX*/16+4]=value.tx;
 		f32[ /*laya.display.SpriteConst.POSMATRIX*/16+5]=value.ty;
+	}
+
+	/**@private */
+	__proto._setTranformChange=function(){
+		(this)._tfChanged=true;
+		(this).parentRepaint(/*laya.display.SpriteConst.REPAINT_CACHE*/0x02);
 	}
 
 	//TODO:coverage
@@ -13954,17 +15715,27 @@ var ConchSpriteAdpt=(function(_super){
 	//TODO:coverage
 	__proto._setX=function(value){
 		this._x=this._dataf32[ /*laya.display.SpriteConst.POSX*/6]=value;
-		this._renderType |=/*laya.display.SpriteConst.TRANSFORM*/0x02;
-		this._setRenderType(this._renderType);
 		this._dataf32[ /*laya.display.SpriteConst.POSTRANSFORM_FLAG*/15]=1.0;
 	}
 
 	//TODO:coverage
 	__proto._setY=function(value){
 		this._y=this._dataf32[ /*laya.display.SpriteConst.POSY*/7]=value;
-		this._renderType |=/*laya.display.SpriteConst.TRANSFORM*/0x02;
-		this._setRenderType(this._renderType);
 		this._dataf32[ /*laya.display.SpriteConst.POSTRANSFORM_FLAG*/15]=1.0;
+	}
+
+	//TODO:coverage
+	__proto._setWidth=function(texture,width){
+		if (texture && texture.getIsReady()){
+			this._setTextureEx(texture,true);
+		}
+	}
+
+	//TODO:coverage
+	__proto._setHeight=function(texture,height){
+		if (texture && texture.getIsReady()){
+			this._setTextureEx(texture,true);
+		}
 	}
 
 	//TODO:coverage
@@ -14013,8 +15784,10 @@ var ConchSpriteAdpt=(function(_super){
 	//TODO:coverage
 	__proto._setRenderType=function(type){
 		this._datai32[ /*laya.display.SpriteConst.POSRENDERTYPE*/0]=type;
-		LayaGLTemplate.GLS[type] || LayaGLTemplate.createByRenderType(type);
-		LayaGLTemplate.GLSE[type] || LayaGLTemplate.createByRenderTypeEnd(type);
+		if (!LayaGLTemplate.GLS[type]){
+			LayaGLTemplate.createByRenderType(type);
+			LayaGLTemplate.createByRenderTypeEnd(type);
+		}
 	}
 
 	__proto.parentRepaint=function(){}
@@ -14133,6 +15906,10 @@ var ConchSpriteAdpt=(function(_super){
 		_i32b[2]=isloaded?value.bitmap._glTexture.id:0;
 		var w=isloaded?value.width:0;
 		var h=isloaded?value.height:0;
+		var spW=(this)._width;
+		var spH=(this)._height;
+		w=spW > 0 ? spW :w;
+		h=spH > 0 ? spH :h;
 		_fb[11]=_fb[17]=w;
 		_fb[18]=_fb[24]=h;
 		var nPtrID=this._drawSimpleImageData.getPtrID();
@@ -14174,6 +15951,7 @@ var ConchSpriteAdpt=(function(_super){
 		this._dataf32[ /*laya.display.SpriteConst.POSCLIP*/28+3]=value.height;
 		this._dataf32[ /*laya.display.SpriteConst.POSCLIP_NEG_POS*/32]=-value.x;
 		this._dataf32[ /*laya.display.SpriteConst.POSCLIP_NEG_POS*/32+1]=-value.y;
+		value["onPropertyChanged"]=(this._setScrollRect).bind(this);
 	}
 
 	//TODO:coverage
@@ -14534,7 +16312,10 @@ var ConchSpriteAdpt=(function(_super){
 		"maskRenderFromNative",
 		"_setBlendMode",
 		"_setBgStyleColor",
-		"_setBorderStyleColor"];
+		"_setBorderStyleColor",
+		"_setWidth",
+		"_setHeight",
+		"_setTranformChange",];
 		var i=0,len=0;
 		len=funs.length;
 		var tFunName;
@@ -14615,6 +16396,369 @@ var ConchSpriteAdpt=(function(_super){
 	]);
 	return ConchSpriteAdpt;
 })(Node)
+
+
+//class laya.webgl.text.TextTexture extends laya.resource.Resource
+var TextTexture=(function(_super){
+	function TextTexture(textureW,textureH){
+		this._source=null;
+		// webgl 贴图
+		this._texW=0;
+		this._texH=0;
+		this.__destroyed=false;
+		//父类有，但是private
+		this._discardTm=0;
+		//释放的时间。超过一定时间会被真正删除
+		this.genID=0;
+		// 这个对象会重新利用，为了能让引用他的人知道自己引用的是否有效，加个id
+		this.bitmap={id:0,_glTexture:null};
+		//samekey的判断用的
+		this.curUsedCovRate=0;
+		// 当前使用到的使用率。根据面积算的
+		this.curUsedCovRateAtlas=0;
+		// 大图集中的占用率。由于大图集分辨率低，所以会浪费一些空间
+		this.lastTouchTm=0;
+		this.ri=null;
+		TextTexture.__super.call(this);
+		this._texW=textureW || TextRender.atlasWidth;
+		this._texH=textureH || TextRender.atlasWidth;
+		this.bitmap.id=this.id;
+		this.lock=true;
+	}
+
+	__class(TextTexture,'laya.webgl.text.TextTexture',_super);
+	var __proto=TextTexture.prototype;
+	//防止被资源管理清除
+	__proto.recreateResource=function(){
+		if (this._source)
+			return;
+		var gl=Render.isConchApp?LayaGL.instance.getDefaultCommandEncoder():WebGL.mainContext;
+		var glTex=this._source=gl.createTexture();
+		this.bitmap._glTexture=glTex;
+		WebGLContext.bindTexture(gl,/*laya.webgl.WebGLContext.TEXTURE_2D*/0x0DE1,glTex);
+		gl.texImage2D(/*laya.webgl.WebGLContext.TEXTURE_2D*/0x0DE1,0,/*laya.webgl.WebGLContext.RGBA*/0x1908,this._texW,this._texH,0,/*laya.webgl.WebGLContext.RGBA*/0x1908,/*laya.webgl.WebGLContext.UNSIGNED_BYTE*/0x1401,null);
+		gl.texParameteri(/*laya.webgl.WebGLContext.TEXTURE_2D*/0x0DE1,/*laya.webgl.WebGLContext.TEXTURE_MIN_FILTER*/0x2801,/*laya.webgl.WebGLContext.LINEAR*/0x2601);
+		gl.texParameteri(/*laya.webgl.WebGLContext.TEXTURE_2D*/0x0DE1,/*laya.webgl.WebGLContext.TEXTURE_MAG_FILTER*/0x2800,/*laya.webgl.WebGLContext.LINEAR*/0x2601);
+		gl.texParameteri(/*laya.webgl.WebGLContext.TEXTURE_2D*/0x0DE1,/*laya.webgl.WebGLContext.TEXTURE_WRAP_S*/0x2802,/*laya.webgl.WebGLContext.CLAMP_TO_EDGE*/0x812F);
+		gl.texParameteri(/*laya.webgl.WebGLContext.TEXTURE_2D*/0x0DE1,/*laya.webgl.WebGLContext.TEXTURE_WRAP_T*/0x2803,/*laya.webgl.WebGLContext.CLAMP_TO_EDGE*/0x812F);
+		if (TextRender.debugUV){
+			this.fillWhite();
+		}
+	}
+
+	/**
+	*
+	*@param data
+	*@param x 拷贝位置。
+	*@param y
+	*@param uv
+	*@return uv数组 如果uv不为空就返回传入的uv，否则new一个数组
+	*/
+	__proto.addChar=function(data,x,y,uv){
+		if(TextRender.isWan1Wan){
+			return this.addCharCanvas(data ,x,y,uv);
+		}
+		!this._source && this.recreateResource();
+		var gl=Render.isConchApp?LayaGL.instance.getDefaultCommandEncoder():WebGL.mainContext;
+		WebGLContext.bindTexture(gl,/*laya.webgl.WebGLContext.TEXTURE_2D*/0x0DE1,this._source);
+		!Render.isConchApp && gl.pixelStorei(/*laya.webgl.WebGLContext.UNPACK_PREMULTIPLY_ALPHA_WEBGL*/0x9241,true);
+		var dt=data.data;
+		if (/*__JS__ */data.data instanceof Uint8ClampedArray)
+			dt=new Uint8Array(dt.buffer);
+		gl.texSubImage2D(/*laya.webgl.WebGLContext.TEXTURE_2D*/0x0DE1,0,x,y,data.width,data.height,/*laya.webgl.WebGLContext.RGBA*/0x1908,/*laya.webgl.WebGLContext.UNSIGNED_BYTE*/0x1401,dt);
+		!Render.isConchApp && gl.pixelStorei(/*laya.webgl.WebGLContext.UNPACK_PREMULTIPLY_ALPHA_WEBGL*/0x9241,false);
+		var u0=NaN;
+		var v0=NaN;
+		var u1=NaN;
+		var v1=NaN;
+		if(Render.isConchApp){
+			u0=x / this._texW;
+			v0=y / this._texH;
+			u1=(x+data.width)/ this._texW;
+			v1=(y+data.height)/ this._texH;
+			}else{
+			u0=(x+1)/ this._texW;
+			v0=(y+1)/ this._texH;
+			u1=(x+data.width-1)/ this._texW;
+			v1=(y+data.height-1)/ this._texH;
+		}
+		uv=uv || new Array(8);
+		uv[0]=u0,uv[1]=v0;
+		uv[2]=u1,uv[3]=v0;
+		uv[4]=u1,uv[5]=v1;
+		uv[6]=u0,uv[7]=v1;
+		return uv;
+	}
+
+	/**
+	*玩一玩不支持 getImageData
+	*@param canv
+	*@param x
+	*@param y
+	*/
+	__proto.addCharCanvas=function(canv,x,y,uv){
+		!this._source && this.recreateResource();
+		var gl=Render.isConchApp?LayaGL.instance.getDefaultCommandEncoder():WebGL.mainContext;
+		WebGLContext.bindTexture(gl,/*laya.webgl.WebGLContext.TEXTURE_2D*/0x0DE1,this._source);
+		!Render.isConchApp && gl.pixelStorei(/*laya.webgl.WebGLContext.UNPACK_PREMULTIPLY_ALPHA_WEBGL*/0x9241,true);
+		gl.texSubImage2D(/*laya.webgl.WebGLContext.TEXTURE_2D*/0x0DE1,0,x,y,/*laya.webgl.WebGLContext.RGBA*/0x1908,/*laya.webgl.WebGLContext.UNSIGNED_BYTE*/0x1401,canv);
+		!Render.isConchApp && gl.pixelStorei(/*laya.webgl.WebGLContext.UNPACK_PREMULTIPLY_ALPHA_WEBGL*/0x9241,false);
+		var u0=NaN;
+		var v0=NaN;
+		var u1=NaN;
+		var v1=NaN;
+		if(Render.isConchApp){
+			u0=x / this._texW;
+			v0=y / this._texH;
+			u1=(x+canv.width)/ this._texW;
+			v1=(y+canv.height)/ this._texH;
+			}else{
+			u0=(x+1)/ this._texW;
+			v0=(y+1)/ this._texH;
+			u1=(x+canv.width-1)/ this._texW;
+			v1=(y+canv.height-1)/ this._texH;
+		}
+		uv=uv || new Array(8);
+		uv[0]=u0,uv[1]=v0;
+		uv[2]=u1,uv[3]=v0;
+		uv[4]=u1,uv[5]=v1;
+		uv[6]=u0,uv[7]=v1;
+		return uv;
+	}
+
+	/**
+	*填充白色。调试用。
+	*/
+	__proto.fillWhite=function(){
+		!this._source && this.recreateResource();
+		var gl=Render.isConchApp?LayaGL.instance.getDefaultCommandEncoder():WebGL.mainContext;
+		var dt=new Uint8Array(this._texW *this._texH *4);
+		(dt).fill(0xff);
+		gl.texSubImage2D(/*laya.webgl.WebGLContext.TEXTURE_2D*/0x0DE1,0,0,0,this._texW,this._texH,/*laya.webgl.WebGLContext.RGBA*/0x1908,/*laya.webgl.WebGLContext.UNSIGNED_BYTE*/0x1401,dt);
+	}
+
+	__proto.discard=function(){
+		if (this._texW !=TextRender.atlasWidth || this._texH !=TextRender.atlasWidth){
+			this.destroy();
+			return;
+		}
+		this.genID++;
+		if (TextTexture.poolLen >=TextTexture.pool.length){
+			TextTexture.pool=TextTexture.pool.concat(new Array(10));
+		}
+		this._discardTm=Laya.stage.getFrameTm();
+		TextTexture.pool[TextTexture.poolLen++]=this;
+	}
+
+	__proto.destroy=function(){
+		console.log('destroy TextTexture');
+		this.__destroyed=true;
+		var gl=Render.isConchApp?LayaGL.instance.getDefaultCommandEncoder():WebGL.mainContext;
+		this._source && gl.deleteTexture(this._source);
+		this._source=null;
+	}
+
+	__proto.touchRect=function(ri,curloop){
+		if (this.lastTouchTm !=curloop){
+			this.curUsedCovRate=0;
+			this.curUsedCovRateAtlas=0;
+			this.lastTouchTm=curloop;
+		};
+		var texw2=TextRender.atlasWidth *TextRender.atlasWidth;
+		var gridw2=TextAtlas.atlasGridW *TextAtlas.atlasGridW;
+		this.curUsedCovRate+=(ri.bmpWidth *ri.bmpHeight)/ texw2;
+		this.curUsedCovRateAtlas+=(Math.ceil(ri.bmpWidth / TextAtlas.atlasGridW)*Math.ceil(ri.bmpHeight / TextAtlas.atlasGridW))/ (texw2 / gridw2);
+	}
+
+	__proto._getSource=function(){
+		return this._source;
+	}
+
+	// for debug
+	__proto.drawOnScreen=function(x,y){}
+	// 为了与当前的文字渲染兼容的补丁
+	__getset(0,__proto,'texture',function(){
+		return this;
+	});
+
+	TextTexture.getTextTexture=function(w,h){
+		if (w !=TextRender.atlasWidth || w !=TextRender.atlasWidth)
+			return new TextTexture(w,h);
+		if (TextTexture.poolLen > 0){
+			var ret=TextTexture.pool[--TextTexture.poolLen];
+			if (TextTexture.poolLen > 0)
+				TextTexture.clean();
+			return ret;
+		}
+		return new TextTexture(w,h);
+	}
+
+	TextTexture.clean=function(){
+		var curtm=Laya.stage.getFrameTm();
+		if (TextTexture.cleanTm===0)TextTexture.cleanTm=curtm;
+		if (curtm-TextTexture.cleanTm >=TextRender.checkCleanTextureDt){
+			for (var i=0;i < TextTexture.poolLen;i++){
+				var p=TextTexture.pool[i];
+				if (curtm-p._discardTm >=TextRender.destroyUnusedTextureDt){
+					p.destroy();
+					TextTexture.pool[i]=TextTexture.pool[TextTexture.poolLen-1];
+					TextTexture.poolLen--;
+					i--;
+				}
+			}
+			TextTexture.cleanTm=curtm;
+		}
+	}
+
+	TextTexture.poolLen=0;
+	TextTexture.cleanTm=0;
+	__static(TextTexture,
+	['pool',function(){return this.pool=new Array(10);}
+	]);
+	return TextTexture;
+})(Resource)
+
+
+//class laya.webgl.utils.IndexBuffer2D extends laya.webgl.utils.Buffer2D
+var IndexBuffer2D=(function(_super){
+	function IndexBuffer2D(bufferUsage){
+		this._uint16Array=null;
+		(bufferUsage===void 0)&& (bufferUsage=0x88e4);
+		IndexBuffer2D.__super.call(this);
+		this._bufferUsage=bufferUsage;
+		this._bufferType=/*laya.webgl.WebGLContext.ELEMENT_ARRAY_BUFFER*/0x8893;
+		this._buffer=new ArrayBuffer(8);
+	}
+
+	__class(IndexBuffer2D,'laya.webgl.utils.IndexBuffer2D',_super);
+	var __proto=IndexBuffer2D.prototype;
+	__proto._checkArrayUse=function(){
+		this._uint16Array && (this._uint16Array=new Uint16Array(this._buffer));
+	}
+
+	__proto.getUint16Array=function(){
+		return this._uint16Array || (this._uint16Array=new Uint16Array(this._buffer));
+	}
+
+	/**
+	*@inheritDoc
+	*/
+	__proto._bindForVAO=function(){
+		LayaGL.instance.bindBuffer(/*laya.webgl.WebGLContext.ELEMENT_ARRAY_BUFFER*/0x8893,this._glBuffer);
+	}
+
+	/**
+	*@inheritDoc
+	*/
+	__proto.bind=function(){
+		if (Buffer._bindedIndexBuffer!==this._glBuffer){
+			LayaGL.instance.bindBuffer(/*laya.webgl.WebGLContext.ELEMENT_ARRAY_BUFFER*/0x8893,this._glBuffer);
+			Buffer._bindedIndexBuffer=this._glBuffer;
+			return true;
+		}
+		return false;
+	}
+
+	__proto.destory=function(){
+		this._uint16Array=null;
+		this._buffer=null;
+	}
+
+	__proto.disposeResource=function(){
+		this._disposeResource();
+	}
+
+	IndexBuffer2D.create=function(bufferUsage){
+		(bufferUsage===void 0)&& (bufferUsage=0x88e4);
+		return new IndexBuffer2D(bufferUsage);
+	}
+
+	return IndexBuffer2D;
+})(Buffer2D)
+
+
+//class laya.webgl.utils.VertexBuffer2D extends laya.webgl.utils.Buffer2D
+var VertexBuffer2D=(function(_super){
+	function VertexBuffer2D(vertexStride,bufferUsage){
+		this._floatArray32=null;
+		this._uint32Array=null;
+		this._vertexStride=0;
+		VertexBuffer2D.__super.call(this);
+		this._vertexStride=vertexStride;
+		this._bufferUsage=bufferUsage;
+		this._bufferType=/*laya.webgl.WebGLContext.ARRAY_BUFFER*/0x8892;
+		this._buffer=new ArrayBuffer(8);
+		this._floatArray32=new Float32Array(this._buffer);
+		this._uint32Array=new Uint32Array(this._buffer);
+	}
+
+	__class(VertexBuffer2D,'laya.webgl.utils.VertexBuffer2D',_super);
+	var __proto=VertexBuffer2D.prototype;
+	__proto.getFloat32Array=function(){
+		return this._floatArray32;
+	}
+
+	/**
+	*在当前位置插入float数组。
+	*@param data
+	*@param pos
+	*/
+	__proto.appendArray=function(data){
+		var oldoff=this._byteLength >> 2;
+		this.setByteLength(this._byteLength+data.length *4);
+		var vbdata=this.getFloat32Array();
+		vbdata.set(data,oldoff);
+		this._upload=true;
+	}
+
+	__proto._checkArrayUse=function(){
+		this._floatArray32 && (this._floatArray32=new Float32Array(this._buffer));
+		this._uint32Array && (this._uint32Array=new Uint32Array(this._buffer));
+	}
+
+	//只删除buffer，不disableVertexAttribArray
+	__proto.deleteBuffer=function(){
+		this._disposeResource();
+	}
+
+	/**
+	*@inheritDoc
+	*/
+	__proto._bindForVAO=function(){
+		LayaGL.instance.bindBuffer(/*laya.webgl.WebGLContext.ARRAY_BUFFER*/0x8892,this._glBuffer);
+	}
+
+	/**
+	*@inheritDoc
+	*/
+	__proto.bind=function(){
+		if (Buffer._bindedVertexBuffer!==this._glBuffer){
+			LayaGL.instance.bindBuffer(/*laya.webgl.WebGLContext.ARRAY_BUFFER*/0x8892,this._glBuffer);
+			Buffer._bindedVertexBuffer=this._glBuffer;
+			return true;
+		}
+		return false;
+	}
+
+	__proto.destroy=function(){
+		laya.webgl.utils.Buffer.prototype.destroy.call(this);
+		this._byteLength=0;
+		this._upload=true;
+		this._buffer=null;
+		this._floatArray32=null;
+	}
+
+	__getset(0,__proto,'vertexStride',function(){
+		return this._vertexStride;
+	});
+
+	VertexBuffer2D.create=function(vertexStride,bufferUsage){
+		(bufferUsage===void 0)&& (bufferUsage=0x88e8);
+		return new VertexBuffer2D(vertexStride,bufferUsage);
+	}
+
+	return VertexBuffer2D;
+})(Buffer2D)
 
 
 /**
@@ -14783,17 +16927,19 @@ var BaseTexture=(function(_super){
 	*@private
 	*/
 	__proto._setAnisotropy=function(value){
-		value=Math.max(value,1);
-		var gl=LayaGL.instance;
-		WebGLContext.bindTexture(gl,this._glTextureType,this._glTexture);
 		var anisotropic=WebGLContext._extTextureFilterAnisotropic;
-		if (anisotropic){
+		if (anisotropic && !Browser.onLimixiu){
+			value=Math.max(value,1);
+			var gl=LayaGL.instance;
+			WebGLContext.bindTexture(gl,this._glTextureType,this._glTexture);
 			value=Math.min(gl.getParameter(anisotropic.MAX_TEXTURE_MAX_ANISOTROPY_EXT),value);
 			gl.texParameterf(this._glTextureType,anisotropic.TEXTURE_MAX_ANISOTROPY_EXT,value);
 		}
 	}
 
-	//TODO:coverage
+	/**
+	*@inheritDoc
+	*/
 	__proto._disposeResource=function(){
 		if (this._glTexture){
 			LayaGL.instance.deleteTexture(this._glTexture);
@@ -15505,278 +17651,6 @@ var Shader=(function(_super){
 })(BaseShader)
 
 
-//class laya.webgl.utils.Buffer2D extends laya.webgl.utils.Buffer
-var Buffer2D=(function(_super){
-	function Buffer2D(){
-		this._maxsize=0;
-		this._upload=true;
-		this._uploadSize=0;
-		this._bufferSize=0;
-		this._u8Array=null;
-		Buffer2D.__super.call(this);
-		this.lock=true;
-	}
-
-	__class(Buffer2D,'laya.webgl.utils.Buffer2D',_super);
-	var __proto=Buffer2D.prototype;
-	__proto.setByteLength=function(value){
-		if (this._byteLength!==value){
-			value <=this._bufferSize || (this._resizeBuffer(value *2+256,true));
-			this._byteLength=value;
-		}
-	}
-
-	/**
-	*在当前的基础上需要多大空间，单位是byte
-	*@param sz
-	*@return 增加大小之前的写位置。单位是byte
-	*/
-	__proto.needSize=function(sz){
-		var old=this._byteLength;
-		if (sz){
-			var needsz=this._byteLength+sz;
-			needsz <=this._bufferSize || (this._resizeBuffer(needsz << 1,true));
-			this._byteLength=needsz;
-		}
-		return old;
-	}
-
-	__proto._bufferData=function(){
-		this._maxsize=Math.max(this._maxsize,this._byteLength);
-		if (Stat.loopCount % 30==0){
-			if (this._buffer.byteLength > (this._maxsize+64)){
-				this._setGPUMemory(this._buffer.byteLength);
-				this._buffer=this._buffer.slice(0,this._maxsize+64);
-				this._bufferSize=this._buffer.byteLength;
-				this._checkArrayUse();
-			}
-			this._maxsize=this._byteLength;
-		}
-		if (this._uploadSize < this._buffer.byteLength){
-			this._uploadSize=this._buffer.byteLength;
-			LayaGL.instance.bufferData(this._bufferType,this._uploadSize,this._bufferUsage);
-			this._setGPUMemory(this._uploadSize);
-		}
-		LayaGL.instance.bufferSubData(this._bufferType,0,this._buffer);
-	}
-
-	//TODO:coverage
-	__proto._bufferSubData=function(offset,dataStart,dataLength){
-		(offset===void 0)&& (offset=0);
-		(dataStart===void 0)&& (dataStart=0);
-		(dataLength===void 0)&& (dataLength=0);
-		this._maxsize=Math.max(this._maxsize,this._byteLength);
-		if (Stat.loopCount % 30==0){
-			if (this._buffer.byteLength > (this._maxsize+64)){
-				this._setGPUMemory(this._buffer.byteLength);
-				this._buffer=this._buffer.slice(0,this._maxsize+64);
-				this._bufferSize=this._buffer.byteLength;
-				this._checkArrayUse();
-			}
-			this._maxsize=this._byteLength;
-		}
-		if (this._uploadSize < this._buffer.byteLength){
-			this._uploadSize=this._buffer.byteLength;
-			LayaGL.instance.bufferData(this._bufferType,this._uploadSize,this._bufferUsage);
-			this._setGPUMemory(this._uploadSize);
-		}
-		if (dataStart || dataLength){
-			var subBuffer=this._buffer.slice(dataStart,dataLength);
-			LayaGL.instance.bufferSubData(this._bufferType,offset,subBuffer);
-			}else {
-			LayaGL.instance.bufferSubData(this._bufferType,offset,this._buffer);
-		}
-	}
-
-	/**
-	*buffer重新分配了，继承类根据需要做相应的处理。
-	*/
-	__proto._checkArrayUse=function(){}
-	/**
-	*给vao使用的 _bind_upload函数。不要与已经绑定的判断是否相同
-	*@return
-	*/
-	__proto._bind_uploadForVAO=function(){
-		if (!this._upload)
-			return false;
-		this._upload=false;
-		this._bindForVAO();
-		this._bufferData();
-		return true;
-	}
-
-	__proto._bind_upload=function(){
-		if (!this._upload)
-			return false;
-		this._upload=false;
-		this.bind();
-		this._bufferData();
-		return true;
-	}
-
-	//TODO:coverage
-	__proto._bind_subUpload=function(offset,dataStart,dataLength){
-		(offset===void 0)&& (offset=0);
-		(dataStart===void 0)&& (dataStart=0);
-		(dataLength===void 0)&& (dataLength=0);
-		if (!this._upload)
-			return false;
-		this._upload=false;
-		this.bind();
-		this._bufferSubData(offset,dataStart,dataLength);
-		return true;
-	}
-
-	/**
-	*重新分配buffer大小，如果nsz比原来的小则什么都不做。
-	*@param nsz buffer大小，单位是byte。
-	*@param copy 是否拷贝原来的buffer的数据。
-	*@return
-	*/
-	__proto._resizeBuffer=function(nsz,copy){
-		if (nsz < this._buffer.byteLength)
-			return this;
-		this._setGPUMemory(nsz);
-		if (copy && this._buffer && this._buffer.byteLength > 0){
-			var newbuffer=new ArrayBuffer(nsz);
-			var oldU8Arr=(this._u8Array && this._u8Array.buffer==this._buffer)?this._u8Array :new Uint8Array(this._buffer);
-			this._u8Array=new Uint8Array(newbuffer);
-			this._u8Array.set(oldU8Arr,0);
-			this._buffer=newbuffer;
-			}else{
-			this._buffer=new ArrayBuffer(nsz);
-		}
-		this._checkArrayUse();
-		this._upload=true;
-		this._bufferSize=this._buffer.byteLength;
-		return this;
-	}
-
-	__proto.append=function(data){
-		this._upload=true;
-		var byteLen=0,n;
-		byteLen=data.byteLength;
-		if ((data instanceof Uint8Array)){
-			this._resizeBuffer(this._byteLength+byteLen,true);
-			n=new Uint8Array(this._buffer,this._byteLength);
-			}else if ((data instanceof Uint16Array)){
-			this._resizeBuffer(this._byteLength+byteLen,true);
-			n=new Uint16Array(this._buffer,this._byteLength);
-			}else if ((data instanceof Float32Array)){
-			this._resizeBuffer(this._byteLength+byteLen,true);
-			n=new Float32Array(this._buffer,this._byteLength);
-		}
-		n.set(data,0);
-		this._byteLength+=byteLen;
-		this._checkArrayUse();
-	}
-
-	//TODO:coverage
-	__proto.appendU16Array=function(data,len){
-		this._resizeBuffer(this._byteLength+len*2,true);
-		var u=new Uint16Array(this._buffer,this._byteLength,len);
-		for (var i=0;i < len;i++){
-			u[i]=data[i];
-		}
-		this._byteLength+=len *2;
-		this._checkArrayUse();
-	}
-
-	//TODO:coverage
-	__proto.appendEx=function(data,type){
-		this._upload=true;
-		var byteLen=0,n;
-		byteLen=data.byteLength;
-		this._resizeBuffer(this._byteLength+byteLen,true);
-		n=new type(this._buffer,this._byteLength);
-		n.set(data,0);
-		this._byteLength+=byteLen;
-		this._checkArrayUse();
-	}
-
-	//TODO:coverage
-	__proto.appendEx2=function(data,type,dataLen,perDataLen){
-		(perDataLen===void 0)&& (perDataLen=1);
-		this._upload=true;
-		var byteLen=0,n;
-		byteLen=dataLen*perDataLen;
-		this._resizeBuffer(this._byteLength+byteLen,true);
-		n=new type(this._buffer,this._byteLength);
-		var i=0;
-		for (i=0;i < dataLen;i++){
-			n[i]=data[i];
-		}
-		this._byteLength+=byteLen;
-		this._checkArrayUse();
-	}
-
-	//TODO:coverage
-	__proto.getBuffer=function(){
-		return this._buffer;
-	}
-
-	__proto.setNeedUpload=function(){
-		this._upload=true;
-	}
-
-	//TODO:coverage
-	__proto.getNeedUpload=function(){
-		return this._upload;
-	}
-
-	//TODO:coverage
-	__proto.upload=function(){
-		var scuess=this._bind_upload();
-		LayaGL.instance.bindBuffer(this._bufferType,null);
-		if(this._bufferType==/*laya.webgl.WebGLContext.ARRAY_BUFFER*/0x8892)Buffer._bindedVertexBuffer=null;
-		if(this._bufferType==/*laya.webgl.WebGLContext.ELEMENT_ARRAY_BUFFER*/0x8893)Buffer._bindedIndexBuffer=null;
-		BaseShader.activeShader=null
-		return scuess;
-	}
-
-	//TODO:coverage
-	__proto.subUpload=function(offset,dataStart,dataLength){
-		(offset===void 0)&& (offset=0);
-		(dataStart===void 0)&& (dataStart=0);
-		(dataLength===void 0)&& (dataLength=0);
-		var scuess=this._bind_subUpload();
-		LayaGL.instance.bindBuffer(this._bufferType,null);
-		if(this._bufferType==/*laya.webgl.WebGLContext.ARRAY_BUFFER*/0x8892)Buffer._bindedVertexBuffer=null;
-		if(this._bufferType==/*laya.webgl.WebGLContext.ELEMENT_ARRAY_BUFFER*/0x8893)Buffer._bindedIndexBuffer=null;
-		BaseShader.activeShader=null
-		return scuess;
-	}
-
-	__proto._disposeResource=function(){
-		_super.prototype._disposeResource.call(this);
-		this._upload=true;
-		this._uploadSize=0;
-	}
-
-	/**
-	*清理数据。保留ArrayBuffer
-	*/
-	__proto.clear=function(){
-		this._byteLength=0;
-		this._upload=true;
-	}
-
-	//反正常常要拷贝老的数据，所以保留这个可以提高效率
-	__getset(0,__proto,'bufferLength',function(){
-		return this._buffer.byteLength;
-	});
-
-	__getset(0,__proto,'byteLength',null,function(value){
-		this.setByteLength(value);
-	});
-
-	Buffer2D.__int__=function(gl){}
-	Buffer2D.FLOAT32=4;
-	Buffer2D.SHORT=2;
-	return Buffer2D;
-})(Buffer)
-
-
 /**
 *<code>RenderTexture</code> 类用于创建渲染目标。
 */
@@ -15954,6 +17828,7 @@ var RenderTexture2D=(function(_super){
 		return pixels;
 	}
 
+	__proto.recycle=function(){}
 	/**
 	*@inheritDoc
 	*/
@@ -16144,8 +18019,8 @@ var Texture2D=(function(_super){
 		};
 		var width=header[DDS_HEADER_WIDTH];
 		var height=header[DDS_HEADER_HEIGHT];
-		if (this._width!==width || this._height!==height)
-			throw "the width or height is not same with Texture2D.";
+		this._width=width;
+		this._height=height;
 		var dataOffset=header[DDS_HEADER_SIZE]+4;
 		this._upLoadCompressedTexImage2D(arrayBuffer,width,height,mipLevels,dataOffset,0);
 	}
@@ -16183,8 +18058,8 @@ var Texture2D=(function(_super){
 		var mipLevels=header[ETC_HEADER_MIPMAPCOUNT];
 		var width=header[ETC_HEADER_WIDTH];
 		var height=header[ETC_HEADER_HEIGHT];
-		if (this._width!==width || this._height!==height)
-			throw "the width or height is not same with Texture2D.";
+		this._width=width;
+		this._height=height;
 		var dataOffset=64+header[ETC_HEADER_METADATA];
 		this._upLoadCompressedTexImage2D(arrayBuffer,width,height,mipLevels,dataOffset,4);
 	}
@@ -16237,8 +18112,8 @@ var Texture2D=(function(_super){
 		var mipLevels=header[PVR_HEADER_MIPMAPCOUNT];
 		var width=header[PVR_HEADER_WIDTH];
 		var height=header[PVR_HEADER_HEIGHT];
-		if (this._width!==width || this._height!==height)
-			throw "the width or height is not same with Texture2D.";
+		this._width=width;
+		this._height=height;
 		var dataOffset=header[PVR_HEADER_METADATA]+52;
 		this._upLoadCompressedTexImage2D(arrayBuffer,width,height,mipLevels,dataOffset,0);
 	}
@@ -16476,147 +18351,5 @@ var Shader2X=(function(_super){
 })(Shader)
 
 
-//class laya.webgl.utils.IndexBuffer2D extends laya.webgl.utils.Buffer2D
-var IndexBuffer2D=(function(_super){
-	function IndexBuffer2D(bufferUsage){
-		this._uint16Array=null;
-		(bufferUsage===void 0)&& (bufferUsage=0x88e4);
-		IndexBuffer2D.__super.call(this);
-		this._bufferUsage=bufferUsage;
-		this._bufferType=/*laya.webgl.WebGLContext.ELEMENT_ARRAY_BUFFER*/0x8893;
-		this._buffer=new ArrayBuffer(8);
-	}
-
-	__class(IndexBuffer2D,'laya.webgl.utils.IndexBuffer2D',_super);
-	var __proto=IndexBuffer2D.prototype;
-	__proto._checkArrayUse=function(){
-		this._uint16Array && (this._uint16Array=new Uint16Array(this._buffer));
-	}
-
-	__proto.getUint16Array=function(){
-		return this._uint16Array || (this._uint16Array=new Uint16Array(this._buffer));
-	}
-
-	/**
-	*@inheritDoc
-	*/
-	__proto._bindForVAO=function(){
-		LayaGL.instance.bindBuffer(/*laya.webgl.WebGLContext.ELEMENT_ARRAY_BUFFER*/0x8893,this._glBuffer);
-	}
-
-	/**
-	*@inheritDoc
-	*/
-	__proto.bind=function(){
-		if (Buffer._bindedIndexBuffer!==this._glBuffer){
-			LayaGL.instance.bindBuffer(/*laya.webgl.WebGLContext.ELEMENT_ARRAY_BUFFER*/0x8893,this._glBuffer);
-			Buffer._bindedIndexBuffer=this._glBuffer;
-			return true;
-		}
-		return false;
-	}
-
-	__proto.destory=function(){
-		this._uint16Array=null;
-		this._buffer=null;
-	}
-
-	__proto.disposeResource=function(){
-		this._disposeResource();
-	}
-
-	IndexBuffer2D.create=function(bufferUsage){
-		(bufferUsage===void 0)&& (bufferUsage=0x88e4);
-		return new IndexBuffer2D(bufferUsage);
-	}
-
-	return IndexBuffer2D;
-})(Buffer2D)
-
-
-//class laya.webgl.utils.VertexBuffer2D extends laya.webgl.utils.Buffer2D
-var VertexBuffer2D=(function(_super){
-	function VertexBuffer2D(vertexStride,bufferUsage){
-		this._floatArray32=null;
-		this._uint32Array=null;
-		this._vertexStride=0;
-		VertexBuffer2D.__super.call(this);
-		this._vertexStride=vertexStride;
-		this._bufferUsage=bufferUsage;
-		this._bufferType=/*laya.webgl.WebGLContext.ARRAY_BUFFER*/0x8892;
-		this._buffer=new ArrayBuffer(8);
-		this._floatArray32=new Float32Array(this._buffer);
-		this._uint32Array=new Uint32Array(this._buffer);
-	}
-
-	__class(VertexBuffer2D,'laya.webgl.utils.VertexBuffer2D',_super);
-	var __proto=VertexBuffer2D.prototype;
-	__proto.getFloat32Array=function(){
-		return this._floatArray32;
-	}
-
-	/**
-	*在当前位置插入float数组。
-	*@param data
-	*@param pos
-	*/
-	__proto.appendArray=function(data){
-		var oldoff=this._byteLength >> 2;
-		this.setByteLength(this._byteLength+data.length *4);
-		var vbdata=this.getFloat32Array();
-		vbdata.set(data,oldoff);
-		this._upload=true;
-	}
-
-	__proto._checkArrayUse=function(){
-		this._floatArray32 && (this._floatArray32=new Float32Array(this._buffer));
-		this._uint32Array && (this._uint32Array=new Uint32Array(this._buffer));
-	}
-
-	//只删除buffer，不disableVertexAttribArray
-	__proto.deleteBuffer=function(){
-		this._disposeResource();
-	}
-
-	/**
-	*@inheritDoc
-	*/
-	__proto._bindForVAO=function(){
-		LayaGL.instance.bindBuffer(/*laya.webgl.WebGLContext.ARRAY_BUFFER*/0x8892,this._glBuffer);
-	}
-
-	/**
-	*@inheritDoc
-	*/
-	__proto.bind=function(){
-		if (Buffer._bindedVertexBuffer!==this._glBuffer){
-			LayaGL.instance.bindBuffer(/*laya.webgl.WebGLContext.ARRAY_BUFFER*/0x8892,this._glBuffer);
-			Buffer._bindedVertexBuffer=this._glBuffer;
-			return true;
-		}
-		return false;
-	}
-
-	__proto.destroy=function(){
-		laya.resource.Resource.prototype.destroy.call(this);
-		this._byteLength=0;
-		this._upload=true;
-		this._buffer=null;
-		this._floatArray32=null;
-	}
-
-	__getset(0,__proto,'vertexStride',function(){
-		return this._vertexStride;
-	});
-
-	VertexBuffer2D.create=function(vertexStride,bufferUsage){
-		(bufferUsage===void 0)&& (bufferUsage=0x88e8);
-		return new VertexBuffer2D(vertexStride,bufferUsage);
-	}
-
-	return VertexBuffer2D;
-})(Buffer2D)
-
-
-	Laya.__init([CharBook,Path,WebGLContext2D,ShaderCompile]);
+	Laya.__init([CharBook,Path,WebGLContext2D]);
 })(window,document,Laya);

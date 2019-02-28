@@ -1,4 +1,5 @@
 import GameConfig from "./GameConfig";
+import { D3TweenTest } from "./D3TweenTest";
 class Main {
 	constructor() {
 		//根据IDE设置初始化引擎		
@@ -28,7 +29,9 @@ class Main {
 
 	onConfigLoaded(): void {
 		//加载IDE指定的场景
-		GameConfig.startScene && Laya.Scene.open(GameConfig.startScene);
+		// GameConfig.startScene && Laya.Scene.open(GameConfig.startScene);
+		let test = new D3TweenTest();
+		test.startTest();
 	}
 }
 //激活启动类

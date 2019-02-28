@@ -1532,6 +1532,7 @@ box2d.b2TensorDampingController.prototype.Step=function(a){a=a.dt;if(!(a<=box2d.
 box2d.b2Vec2.s_t1))}}}};box2d.b2TensorDampingController.prototype.Step.s_damping=new box2d.b2Vec2;box2d.b2TensorDampingController.prototype.SetAxisAligned=function(a,b){this.T.ex.x=-a;this.T.ex.y=0;this.T.ey.x=0;this.T.ey.y=-b;this.maxTimestep=0<a||0<b?1/box2d.b2Max(a,b):0};
 
 box2d.b2Vec2.SubVV=function(a, b, out) { out.x = a.x - b.x; out.y = a.y - b.y; return out; };
+window.box2d=box2d;
 (function(window,document,Laya){
 	var __un=Laya.un,__uns=Laya.uns,__static=Laya.static,__class=Laya.class,__getset=Laya.getset,__newvec=Laya.__newvec;
 
@@ -1908,6 +1909,14 @@ var ColliderBase=(function(_super){
 		}
 	}
 
+	/**
+	*@private
+	*重置形状
+	*/
+	__proto.resetShape=function(re){
+		(re===void 0)&& (re=true);
+	}
+
 	/**摩擦力，取值范围0-1，值越大，摩擦越大，默认值为0.2*/
 	__getset(0,__proto,'friction',function(){
 		return this._friction;
@@ -2043,14 +2052,7 @@ var RigidBody=(function(_super){
 		}
 		def.type=box2d.b2BodyType["b2_"+this._type+"Body"];
 		this._body=Physics.I._createBody(def);
-		var comps=this.owner.getComponents(ColliderBase);
-		if (comps){
-			for (var i=0,n=comps.length;i < n;i++){
-				var collider=comps[i];
-				collider.rigidBody=this;
-				collider.refresh();
-			}
-		}
+		this.resetCollider(false);
 	}
 
 	__proto._onAwake=function(){
@@ -2079,6 +2081,32 @@ var RigidBody=(function(_super){
 				_$this._sysNodeToPhysic();
 			};
 			this._overSet(sp,"rotation",setRotation);
+			function setScaleX (value){
+				sp._$set_scaleX(value);
+				_$this.resetCollider(true);
+			};
+			this._overSet(sp,"scaleX",setScaleX);
+			function setScaleY (value){
+				sp._$set_scaleY(value);
+				_$this.resetCollider(true);
+			};
+			this._overSet(sp,"scaleY",setScaleY);
+		}
+	}
+
+	/**
+	*重置Collider
+	*@param resetShape 是否先重置形状，比如缩放导致碰撞体变化
+	*/
+	__proto.resetCollider=function(resetShape){
+		var comps=this.owner.getComponents(ColliderBase);
+		if (comps){
+			for (var i=0,n=comps.length;i < n;i++){
+				var collider=comps[i];
+				collider.rigidBody=this;
+				if (resetShape)collider.resetShape();
+				else collider.refresh();
+			}
 		}
 	}
 
@@ -2161,7 +2189,7 @@ var RigidBody=(function(_super){
 	*/
 	__proto.applyForceToCenter=function(force){
 		if (!this._body)this._onAwake();
-		this._body.applyForceToCenter(force);
+		this._body.ApplyForceToCenter(force);
 	}
 
 	/**
@@ -2784,7 +2812,7 @@ var CircleCollider=(function(_super){
 	var __proto=CircleCollider.prototype;
 	__proto.getDef=function(){
 		if (!this._shape){
-			this._shape=CircleCollider._temp || (CircleCollider._temp=new window.box2d.b2CircleShape());
+			this._shape=new window.box2d.b2CircleShape();
 			this._setShape(false);
 		}
 		this.label=(this.label || "CircleCollider");
@@ -2793,9 +2821,16 @@ var CircleCollider=(function(_super){
 
 	__proto._setShape=function(re){
 		(re===void 0)&& (re=true);
-		this._shape.m_radius=this._radius / Physics.PIXEL_RATIO;
-		this._shape.m_p.Set((this._radius+this._x)/ Physics.PIXEL_RATIO,(this._radius+this._y)/ Physics.PIXEL_RATIO);
+		var scale=this.owner["scaleX"] || 1;
+		this._shape.m_radius=this._radius / Physics.PIXEL_RATIO *scale;
+		this._shape.m_p.Set((this._radius+this._x)/ Physics.PIXEL_RATIO *scale,(this._radius+this._y)/ Physics.PIXEL_RATIO *scale);
 		if (re)this.refresh();
+	}
+
+	/**@private 重置形状*/
+	__proto.resetShape=function(re){
+		(re===void 0)&& (re=true);
+		this._setShape();
 	}
 
 	/**相对节点的x轴偏移*/
@@ -2952,7 +2987,7 @@ var BoxCollider=(function(_super){
 	var __proto=BoxCollider.prototype;
 	__proto.getDef=function(){
 		if (!this._shape){
-			this._shape=BoxCollider._temp || (BoxCollider._temp=new window.box2d.b2PolygonShape());
+			this._shape=new window.box2d.b2PolygonShape();
 			this._setShape(false);
 		}
 		this.label=(this.label || "BoxCollider");
@@ -2961,8 +2996,16 @@ var BoxCollider=(function(_super){
 
 	__proto._setShape=function(re){
 		(re===void 0)&& (re=true);
-		this._shape.SetAsBox(this._width / 2 / Physics.PIXEL_RATIO,this._height / 2 / Physics.PIXEL_RATIO,new window.box2d.b2Vec2((this._width / 2+this._x)/ Physics.PIXEL_RATIO,(this._height / 2+this._y)/ Physics.PIXEL_RATIO));
+		var scaleX=(this.owner["scaleX"] || 1);
+		var scaleY=(this.owner["scaleY"] || 1);
+		this._shape.SetAsBox(this._width / 2 / Physics.PIXEL_RATIO *scaleX,this._height / 2 / Physics.PIXEL_RATIO *scaleY,new window.box2d.b2Vec2((this._width / 2+this._x)/ Physics.PIXEL_RATIO *scaleX,(this._height / 2+this._y)/ Physics.PIXEL_RATIO *scaleY));
 		if (re)this.refresh();
+	}
+
+	/**@private 重置形状*/
+	__proto.resetShape=function(re){
+		(re===void 0)&& (re=true);
+		this._setShape();
 	}
 
 	/**矩形宽度*/
@@ -3265,7 +3308,7 @@ var ChainCollider=(function(_super){
 	var __proto=ChainCollider.prototype;
 	__proto.getDef=function(){
 		if (!this._shape){
-			this._shape=ChainCollider._temp || (ChainCollider._temp=new window.box2d.b2ChainShape());
+			this._shape=new window.box2d.b2ChainShape();
 			this._setShape(false);
 		}
 		this.label=(this.label || "ChainCollider");
@@ -3318,7 +3361,6 @@ var ChainCollider=(function(_super){
 		if (this._shape)this._setShape();
 	});
 
-	ChainCollider._temp=null;
 	return ChainCollider;
 })(ColliderBase)
 
@@ -3343,7 +3385,7 @@ var PolygonCollider=(function(_super){
 	var __proto=PolygonCollider.prototype;
 	__proto.getDef=function(){
 		if (!this._shape){
-			this._shape=PolygonCollider._temp || (PolygonCollider._temp=new window.box2d.b2PolygonShape());
+			this._shape=new window.box2d.b2PolygonShape();
 			this._setShape(false);
 		}
 		this.label=(this.label || "PolygonCollider");
@@ -3389,7 +3431,6 @@ var PolygonCollider=(function(_super){
 		if (this._shape)this._setShape();
 	});
 
-	PolygonCollider._temp=null;
 	return PolygonCollider;
 })(ColliderBase)
 

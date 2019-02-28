@@ -1410,6 +1410,7 @@ var HTMLImageElement=(function(_super){
 
 	//TODO:coverage
 	__proto.onloaded=function(){
+		if (!this._style)return;
 		var style=this._style;
 		var w=style.widthed(this)?-1 :this._tex.width;
 		var h=style.heighted(this)?-1 :this._tex.height;

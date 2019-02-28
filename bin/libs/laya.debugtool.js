@@ -8,8 +8,8 @@
 	var Input=laya.display.Input,Loader=laya.net.Loader,LoaderManager=laya.net.LoaderManager,LocalStorage=laya.net.LocalStorage;
 	var MathUtil=laya.maths.MathUtil,Matrix=laya.maths.Matrix,Node=laya.display.Node,Point=laya.maths.Point,Pool=laya.utils.Pool;
 	var Rectangle=laya.maths.Rectangle,Render=laya.renders.Render,RenderSprite=laya.renders.RenderSprite,Resource=laya.resource.Resource;
-	var ResourceManager=laya.resource.ResourceManager,Sprite=laya.display.Sprite,Stage=laya.display.Stage,Stat=laya.utils.Stat;
-	var Text=laya.display.Text,Texture=laya.resource.Texture,Timer=laya.utils.Timer,Utils=laya.utils.Utils;
+	var Sprite=laya.display.Sprite,Stage=laya.display.Stage,Stat=laya.utils.Stat,Text=laya.display.Text,Texture=laya.resource.Texture;
+	var Timer=laya.utils.Timer,Utils=laya.utils.Utils;
 /**
 *
 *@author ww
@@ -5698,17 +5698,6 @@ var ResTools=(function(){
 	ResTools.getWebGlResList=function(){
 		var rst;
 		rst=[];
-		var tResource;
-		var _resources;
-		_resources=ResourceManager.currentResourceManager["_resources"];
-		for(var i=0;i <_resources.length;i++){
-			tResource=_resources[i];
-			if(ClassTool.getClassName(tResource)=="WebGLImage"){
-				var url=tResource["src"];
-				if(url&&url.indexOf("data:image/png;base64")<0)
-					rst.push(url);
-			}
-		}
 		return rst;
 	}
 

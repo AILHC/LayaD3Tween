@@ -1,5 +1,5 @@
 import { ui } from "./../ui/layaMaxUI";
-import D3Tween from "../D3Tween";
+import D3Tween from "../D3Tween_old";
 /**
  * 本示例采用非脚本的方式实现，而使用继承页面基类，实现页面逻辑。在IDE里面设置场景的Runtime属性即可和场景进行关联
  * 相比脚本方式，继承式页面类，可以直接使用页面定义的属性（通过IDE内var属性定义），比如this.tipLbll，this.scoreLbl，具有代码提示效果
@@ -23,7 +23,7 @@ export default class GameUI extends ui.test.TestSceneUI {
         directionLight.transform.worldMatrix.setForward(new Laya.Vector3(1, -1, 0));
 
         //添加自定义模型
-        var box: Laya.MeshSprite3D = scene.addChild(new Laya.MeshSprite3D(new Laya.BoxMesh(1, 1, 1))) as Laya.MeshSprite3D;
+        var box: Laya.MeshSprite3D = scene.addChild(new Laya.MeshSprite3D(Laya.PrimitiveMesh.createBox(1, 1, 1))) as Laya.MeshSprite3D;
         box.transform.rotate(new Laya.Vector3(0, 45, 0), false, false);
         var material: Laya.BlinnPhongMaterial = new Laya.BlinnPhongMaterial();
 		Laya.Texture2D.load("res/layabox.png", Laya.Handler.create(null, function(tex:Laya.Texture2D) {

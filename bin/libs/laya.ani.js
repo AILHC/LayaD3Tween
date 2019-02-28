@@ -736,6 +736,8 @@ var BoneSlot=(function(){
 		this.currDisplayData=null;
 		/**显示皮肤的索引 */
 		this.displayIndex=-1;
+		/**@private */
+		this.originalIndex=-1;
 		/**用户自定义的皮肤 */
 		this._diyTexture=null;
 		this._parentMatrix=null;
@@ -803,7 +805,7 @@ var BoneSlot=(function(){
 	__proto.replaceDisplayByIndex=function(tarIndex,newIndex){
 		if (!this.currSlotData)return;
 		this._replaceDic[tarIndex]=newIndex;
-		if (this.displayIndex==tarIndex){
+		if (this.originalIndex==tarIndex){
 			this.showDisplayByIndex(tarIndex);
 		}
 	}
@@ -813,6 +815,7 @@ var BoneSlot=(function(){
 	*@param index
 	*/
 	__proto.showDisplayByIndex=function(index){
+		this.originalIndex=index;
 		if (this._replaceDic[index]!=null)index=this._replaceDic[index];
 		if (this.currSlotData && index >-1 && index < this.currSlotData.displayArr.length){
 			this.displayIndex=index;
@@ -3438,7 +3441,7 @@ var Skeleton=(function(_super){
 			}
 			}else {
 			tFactory=new Templet();
-			tFactory._setUrl(this._aniPath);
+			tFactory._setCreateURL(this._aniPath);
 			Templet.TEMPLET_DICTIONARY[this._aniPath]=tFactory;
 			tFactory.on(/*laya.events.Event.COMPLETE*/"complete",this,this._parseComplete);
 			tFactory.on(/*laya.events.Event.ERROR*/"error",this,this._parseFail);
